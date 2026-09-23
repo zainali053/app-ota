@@ -1,1 +1,1 @@
-v20.1-ota-test
+v20-mapple-bestpick
