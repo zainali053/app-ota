@@ -1087,7 +1087,7 @@ globalThis._extension = (function () {
       {
         id: 'mapple-' + tag,
         name: 'Mapple-4K',
-        desc: '4K • Movies+TV',
+        desc: '4K • Movies+TV ✅OTA-TEST',
         rank: 2,
         language: 'Other',
         readHost: function () {
