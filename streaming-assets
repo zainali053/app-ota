@@ -1,0 +1,1195 @@
+/* ============================================================
+ * v19 streaming extension (standalone, no key)
+ * Provides: getHosts / getSuportLanguages / getDefaultLanguage /
+ *           searchSubtitle / translateSubs / translateI18nFile /
+ *           isVlcFixThisCode / CaptionParser
+ *
+ * Providers (PUBLIC: free/anonymous/zero-setup, device-tested):
+ *  Host 1: NetMirror Multi (net27 variants-tmdb, 18 dubs, movies+TV)
+ *  Host 2: CinePlay-4K (vidrack direct, English, movies+TV)
+ *  Host 3: Vidrack-4K (movy direct, full ladder, movies+TV)
+ *  Host 4: VidSrc (vidsrcme api+wasm+token, English 1080p HLS)
+ *  Host 5: VidLink (secretbox-minted adv token, English 1080p MP4 DIRECT;
+ *           mooncase proxy CF-walled/dead -> bypassed, native needs no proxy)
+ *  Host 6: VixSrc (v9s backup lane: api->embed->tokenized HLS master, EN 720p/480p,
+ *           server-1->2 internal fallback. Vidrift REMOVED: dual-audio unreachable
+ *           in-app, 12-17s load. Verified live: DW/ST/Moana catalog hits.)
+ * Removed: allmovies+videasy-vidnest (vidnest blocked on device NW),
+ *          MovieBox (macdn CDN unplayable on device NW), Videasy
+ *          direct (backend DNS dead).
+ * Subtitles: NONE (sources removed by user request, V19) — section stays empty
+ * ============================================================ */
+globalThis._extension = (function () {
+  'use strict';
+
+  var UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+
+  /* parse5 shim: the app's subtitle renderer (1757 MarkupText) calls the bare
+   * global parse5.parseFragment(cueText). Our cue texts are pre-cleaned plain
+   * text (no tags), so a single #text node is exactly right. */
+  globalThis.parse5 = {
+    parseFragment: function (html) {
+      return { childNodes: [{ nodeName: '#text', value: String(html == null ? '' : html) }] };
+    }
+  };
+
+  /* ---------------- tiny fetch helpers (timeout) ---------------- */
+  function fetchWithTimeout(url, options, timeoutMs) {
+    options = options || {};
+    timeoutMs = timeoutMs || 15000;
+    if (typeof AbortController === 'undefined') {
+      return fetch(url, options);
+    }
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+    options.signal = ctrl.signal;
+    return fetch(url, options).then(function (res) {
+      clearTimeout(timer);
+      return res;
+    }, function (err) {
+      clearTimeout(timer);
+      throw err;
+    });
+  }
+
+  function fetchText(url, headers, timeoutMs) {
+    return fetchWithTimeout(url, { headers: headers || { 'User-Agent': UA } }, timeoutMs || 15000)
+      .then(function (res) {
+        if (!res.ok) throw new Error('http ' + res.status + ' ' + url);
+        return res.text();
+      });
+  }
+
+  function fetchJSON(url, headers, timeoutMs) {
+    return fetchWithTimeout(url, { headers: headers || { 'User-Agent': UA, 'Accept': 'application/json' } }, timeoutMs || 15000)
+      .then(function (res) {
+        if (!res.ok) throw new Error('http ' + res.status + ' ' + url);
+        return res.json();
+      });
+  }
+
+  /* ---------------- caption parsing (SRT + VTT -> ms cues) ---------------- */
+  function tsToMs(t) {
+    var m = String(t).trim().replace(',', '.').match(/^(?:(\d+):)?(\d{1,2}):(\d{1,2})\.(\d{1,3})$/);
+    if (!m) return -1;
+    var h = m[1] ? parseInt(m[1], 10) : 0;
+    var mi = parseInt(m[2], 10);
+    var s = parseInt(m[3], 10);
+    var ms = parseInt((m[4] + '000').slice(0, 3), 10);
+    return ((h * 3600) + (mi * 60) + s) * 1000 + ms;
+  }
+
+  function cleanCueText(s) {
+    s = String(s || '');
+    s = s.replace(/<[^>]*>/g, '');
+    s = s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&nbsp;/g, ' ');
+    return s.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  function parseCaption(text) {
+    var out = [];
+    if (!text) return out;
+    var src = String(text).replace(/\r\n?/g, '\n');
+    if (src.charCodeAt(0) === 0xFEFF) src = src.slice(1);
+    var isVTT = src.slice(0, 6).toUpperCase() === 'WEBVTT';
+    var blocks = src.split(/\n\s*\n/);
+    for (var b = 0; b < blocks.length; b++) {
+      var block = blocks[b].trim();
+      if (!block) continue;
+      if (isVTT && b === 0 && /^WEBVTT/i.test(block)) continue;
+      if (/^(NOTE|STYLE|REGION)(\s|$)/i.test(block)) continue;
+      var lines = block.split('\n');
+      var tsIdx = -1, start = -1, end = -1;
+      for (var i = 0; i < lines.length; i++) {
+        var m = lines[i].match(/(\S+)\s*-->\s*(\S+)/);
+        if (m) {
+          var a = tsToMs(m[1]), c = tsToMs(m[2]);
+          if (a >= 0 && c >= 0) { start = a; end = c; tsIdx = i; break; }
+        }
+      }
+      if (tsIdx < 0) continue;
+      var txt = cleanCueText(lines.slice(tsIdx + 1).join('\n'));
+      if (!txt) continue;
+      out.push({ start: start, end: end, text: txt });
+    }
+    out.sort(function (x, y) { return x.start - y.start; });
+    return out;
+  }
+
+  /* ---------------- languages ---------------- */
+  var LANGS = [
+    { id: 'sublanguageid-eng', code: 'en', name: 'English' },
+    { id: 'sublanguageid-ita', code: 'it', name: 'Italiano' },
+    { id: 'sublanguageid-spa', code: 'es', name: 'Español' },
+    { id: 'sublanguageid-fre', code: 'fr', name: 'Français' },
+    { id: 'sublanguageid-ger', code: 'de', name: 'Deutsch' },
+    { id: 'sublanguageid-por', code: 'pt', name: 'Português' },
+    { id: 'sublanguageid-rus', code: 'ru', name: 'Русский' },
+    { id: 'sublanguageid-ukr', code: 'uk', name: 'Українська' },
+    { id: 'sublanguageid-gre', code: 'el', name: 'Ελληνικά' },
+    { id: 'sublanguageid-ara', code: 'ar', name: 'العربية' },
+    { id: 'sublanguageid-hin', code: 'hi', name: 'हिन्दी' },
+    { id: 'sublanguageid-urd', code: 'ur', name: 'اردو' },
+    { id: 'sublanguageid-tur', code: 'tr', name: 'Türkçe' },
+    { id: 'sublanguageid-nld', code: 'nl', name: 'Nederlands' }
+  ];
+
+  function getSuportLanguages() { return LANGS.slice(); }
+  function getDefaultLanguage() { return LANGS[0]; }
+
+  /* shared resolve cache (masters stable for days -> 30min TTL) */
+  var NM_CACHE = {};
+  var NM_CACHE_TTL = 30 * 60 * 1000;
+
+  function nmCacheKey(ott, kind, title, year, season, episode) {
+    return [ott, kind, String(title || '').toLowerCase(), year || '', season || 0, episode || 0].join('|');
+  }
+  function nmCacheGet(key) {
+    var e = NM_CACHE[key];
+    if (e && e.exp > Date.now()) return e.val;
+    if (e) delete NM_CACHE[key];
+    return null;
+  }
+  function nmCacheSet(key, val) { NM_CACHE[key] = { val: val, exp: Date.now() + NM_CACHE_TTL }; }
+
+  // Batched parallel map (ES5): at most `limit` fn() in flight at once.
+  function nmhiEachLimit(items, limit, fn) {
+    var results = new Array(items.length);
+    var next = 0, finished = 0;
+    return new Promise(function (resolve) {
+      if (!items.length) { resolve(results); return; }
+      function worker() {
+        if (next >= items.length) return;
+        var i = next++;
+        fn(items[i]).then(function (v) { results[i] = v; }, function () { results[i] = null; })
+          .then(function () {
+            finished++;
+            if (finished === items.length) resolve(results);
+            else worker();
+          });
+      }
+      var n = Math.min(limit, items.length);
+      for (var k = 0; k < n; k++) worker();
+    });
+  }
+
+  /* ================= Host 1: NetMirror Multi (v11 intact) ================= */
+  var NMHI_API = 'https://net27.cc';
+  /* Probe one net27 stream file: 'alive' (200/206), 'dead' (definite http
+   * error) or 'unknown' (timeout/network). Unknown is KEPT (benefit of the
+   * doubt on slow nets); only provably-dead files are dropped. */
+  function nmhiProbeStream(fileUrl) {
+    return fetchWithTimeout(fileUrl, { headers: { 'User-Agent': UA, 'Referer': 'https://videodownloader.site/', 'Range': 'bytes=0-0' } }, 6000).then(function (res) {
+      try { if (res && res.body && res.body.cancel) res.body.cancel(); } catch (_e) {}
+      if (!res) return 'unknown';
+      var st = res.status || 0;
+      if (st === 200 || st === 206) return 'alive';
+      if (st === 403 || st === 404 || st === 410 || st === 416) return 'dead';
+      return 'unknown';
+    }, function () { return 'unknown'; });
+  }
+  function nmhiEmbed(sid, dp, kind, season, episode) {
+    var u = NMHI_API + '/api/embed-direct/' + encodeURIComponent(sid) + '?type=' + kind + '&dp=' + encodeURIComponent(dp || '');
+    if (kind === 'tv') u += '&se=' + (season || 1) + '&ep=' + (episode || 1);
+    return fetchJSON(u, { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' }, 15000).then(function (j) {
+      if (!j || j.ok !== true || j.mode === 'none' || !((j.streams || []).length)) throw new Error('nmhi: unavailable');
+      var streams = j.streams.filter(function (s) { return s && s.url && s.resolution; });
+      if (!streams.length) throw new Error('nmhi: no streams');
+      streams.sort(function (a, b) { return b.resolution - a.resolution; });
+      /* STRICT: probe every file, drop provably-dead ones. Unknown (slow
+       * net) is kept. All dead -> dub dies (host fails over, not black). */
+      var probes = streams.map(function (s) {
+        return nmhiProbeStream(s.url).then(function (st) { return { s: s, st: st }; }, function () { return { s: s, st: 'unknown' }; });
+      });
+      return Promise.all(probes).then(function (res2) {
+        var alive = res2.filter(function (x) { return x.st !== 'dead'; });
+        if (!alive.length) throw new Error('nmhi: streams dead');
+        var best = alive[0].s.url;
+        var dq = [{ quality: 'Auto', file: best }];
+        for (var i = 0; i < alive.length; i++) dq.push({ quality: alive[i].s.resolution + 'p', file: alive[i].s.url });
+        return {
+          url: best,
+          headers: { 'Referer': 'https://videodownloader.site/', 'User-Agent': UA },
+          quality: 'Auto',
+          direct_quality: dq,
+          vlc: false
+        };
+      });
+    });
+  }
+  function nmhiEmbedRetry(sid, dp, kind, season, episode) {
+    return nmhiEmbed(sid, dp, kind, season, episode).then(null, function (err) {
+      if (err && /streams dead/.test(err.message || '')) throw err;
+      return new Promise(function (wake) { setTimeout(wake, 600); }).then(function () {
+        return nmhiEmbed(sid, dp, kind, season, episode);
+      });
+    });
+  }
+
+  function nmmultiReadHost(kind, tmdbId, season, episode) {
+    if (!tmdbId) return Promise.reject(new Error('nmmulti: no tmdb id'));
+    var key = nmCacheKey('nmmulti', kind, String(tmdbId), '', season, episode);
+    var hit = nmCacheGet(key);
+    if (hit) return Promise.resolve(hit);
+    return fetchJSON(NMHI_API + '/api/variants-tmdb/' + kind + '/' + encodeURIComponent(String(tmdbId)) + '?se=' + (season || 1) + '&ep=' + (episode || 1),
+      { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' }, 12000).then(function (j) {
+        if (!j || j.ok !== true) throw new Error('nmmulti: no match');
+        var dubs = (j.variants || []).filter(function (d) {
+          return d && d.dubSubjectId && d.detailPath && d.language && !/sub/i.test(d.language);
+        }).map(function (d) {
+          return { subjectId: d.dubSubjectId, detailPath: d.detailPath, lang: String(d.language), original: !!d.isOriginal };
+        });
+        if (!dubs.length) {
+          if (!j.defaultSubjectId || !j.defaultDetailPath) throw new Error('nmmulti: no playable dubs');
+          dubs = [{ subjectId: j.defaultSubjectId, detailPath: j.defaultDetailPath, lang: 'Default', original: true }];
+        }
+        return nmhiEachLimit(dubs, 5, function (d) {
+          return nmhiEmbedRetry(d.subjectId, d.detailPath, kind, season, episode).then(function (r2) {
+            return { d: d, res: r2 };
+          }, function () { return null; });
+        }).then(function (outs) {
+          outs = outs.filter(Boolean);
+          if (!outs.length) throw new Error('nmmulti: no playable dubs');
+          outs.sort(function (a, b) {
+            function w(o) {
+              if (/hindi/i.test(o.d.lang || '')) return 0;
+              if (o.d.original) return 1;
+              return 2;
+            }
+            return w(a) - w(b);
+          });
+          var rows = outs.map(function (o) {
+            var nm = /^default$/i.test(o.d.lang || '') ? 'Original' : String(o.d.lang || 'Audio').replace(/ dub$/i, '');
+            var q = o.res.direct_quality;
+            var bestQ = q.length > 1 ? q[1].quality : 'Auto';
+            var label = bestQ === 'Auto' ? nm : nm + ' \u2022 ' + bestQ;
+            return { lang: nm, quality: '\uD83D\uDD0A ' + label, file: o.res.url };
+          });
+          var dq = [{ quality: 'Auto (' + rows[0].lang + ')', file: outs[0].res.url }];
+          for (var ri = 0; ri < rows.length; ri++) dq.push({ quality: rows[ri].quality, file: rows[ri].file });
+          return {
+            url: outs[0].res.url,
+            headers: outs[0].res.headers,
+            quality: 'Auto',
+            direct_quality: dq,
+            vlc: false
+          };
+        });
+      }).then(function (res) { nmCacheSet(key, res); return res; });
+  }
+
+  /* master ladder validator (single-audio HD/4K lanes).
+   * hintQuality = source's own label (e.g. 2160p) for single-rung files. */
+  function validateLadder(link, referer, tag, hintQuality) {
+    return fetchText(link, { 'User-Agent': UA, 'Referer': referer || '' }, 15000).then(function (m3u) {
+      if (!m3u || m3u.indexOf('#EXTM3U') < 0) throw new Error(tag + ': bad master');
+      var hs = {}, re = /RESOLUTION=(\d+)x(\d+)/g, m;
+      while ((m = re.exec(m3u)) !== null) {
+        var w = parseInt(m[1], 10), h = parseInt(m[2], 10);
+        /* scope rips (1920x804): label by width-class, standard heights kept */
+        var label = h;
+        if (h !== 2160 && h !== 1440 && h !== 1080 && h !== 720 && h !== 480 && h !== 360 && h !== 240) {
+          label = w >= 1900 ? 1080 : w >= 1200 ? 720 : w >= 800 ? 480 : 360;
+        }
+        hs[label] = true;
+      }
+      var keys = Object.keys(hs).map(function (h) { return parseInt(h, 10); }).sort(function (a, b) { return b - a; });
+      var quals = [{ quality: 'Auto', file: link }];
+      var i;
+      if (keys.length) {
+        for (i = 0; i < keys.length; i++) quals.push({ quality: keys[i] + 'p', file: link });
+      } else if (hintQuality) {
+        quals.push({ quality: String(hintQuality), file: link });
+      } else {
+        quals.push({ quality: '1080p', file: link });
+        quals.push({ quality: '720p', file: link });
+      }
+      return { url: link, headers: { 'Referer': referer || '', 'User-Agent': UA }, quality: 'Auto', direct_quality: quals, vlc: false };
+    });
+  }
+
+  /* ================= Host 2: Mapple 4K | Host 3: vidrack direct (movy) ================= */
+  var VX_DIRECT = 'https://vidrack.created.app/api/sources/';
+  var VX_PROXY = 'https://box-prox.jeannefrankli-n2-7-2-0-5.workers.dev/https://vidrack.created.app/api/sources/';
+  function vxFetch(source, tmdbId, kind, season, episode) {
+    var q = '?id=' + encodeURIComponent(String(tmdbId)) + '&type=' + (kind === 'tv' ? 'tv&season=' + (season || 1) + '&episode=' + (episode || 1) : 'movie');
+    return fetchJSON(VX_DIRECT + source + q, { 'User-Agent': UA, 'Accept': 'application/json' }, 20000).then(function (j) {
+      if (j && j.sources && j.sources.length) return j;
+      throw new Error('vx: empty direct');
+    }).then(null, function () {
+      return fetchJSON(VX_PROXY + source + q, { 'User-Agent': UA, 'Accept': 'application/json' }, 20000);
+    });
+  }
+  /* Resolve a segment line against its playlist URL (absolute + relative). */
+  function vxResolveSeg(plUrl, line) {
+    line = String(line || '').trim();
+    if (!line || line.charAt(0) === '#') return null;
+    if (line.indexOf('://') > 0) return line;
+    plUrl = String(plUrl);
+    var schemeEnd = plUrl.indexOf('://');
+    if (schemeEnd < 0) return null;
+    var restStart = schemeEnd + 3;
+    var slashAt = plUrl.indexOf('/', restStart);
+    var origin = slashAt < 0 ? plUrl : plUrl.slice(0, slashAt);
+    var path = slashAt < 0 ? '/' : plUrl.slice(slashAt);
+    if (line.charAt(0) === '/') return origin + line;
+    return origin + path.slice(0, path.lastIndexOf('/') + 1) + line;
+  }
+  /* Sample up to 12 segments (spread + dense tail) with 1-byte Range probes.
+   * Returns count of DEFINITE http errors (4xx/5xx). Timeouts and network
+   * failures count as unknown (0) so slow networks never nuke good rungs. */
+  function vxSampleHoles(plUrl, m3u, referer) {
+    var lines = String(m3u).split(String.fromCharCode(10)), segs = [], i;
+    for (i = 0; i < lines.length; i++) {
+      var u = vxResolveSeg(plUrl, lines[i]);
+      if (u) segs.push(u);
+    }
+    if (segs.length < 3) return Promise.resolve(0);
+    var n = segs.length, pick = {}, fr, t;
+    var fracs = [0, 0.2, 0.4, 0.6, 0.8, 0.95];
+    for (fr = 0; fr < fracs.length; fr++) pick[Math.floor(fracs[fr] * (n - 1))] = true;
+    for (t = 1; t <= 6 && t <= n; t++) pick[n - t] = true;
+    var idx = Object.keys(pick).map(function (k) { return parseInt(k, 10); });
+    var probes = idx.map(function (k) {
+      return fetchWithTimeout(segs[k], { headers: { 'User-Agent': UA, 'Referer': referer || '', 'Range': 'bytes=0-0' } }, 6000).then(function (res) {
+        try { if (res && res.body && res.body.cancel) res.body.cancel(); } catch (_e) {}
+        return (res && res.status >= 400) ? 1 : 0;
+      }, function () { return 0; });
+    });
+    return Promise.all(probes).then(function (vals) {
+      var holes = 0, j;
+      for (j = 0; j < vals.length; j++) holes += vals[j];
+      return holes;
+    });
+  }
+  /* ================= Host 6: VixSrc (v9s backup lane, verified live) =================
+   * API: /api/movie/{id} | /api/tv/{id}/{s}/{e} -> {src:/embed/...} -> embed page
+   * holds playlist urls + token/expires -> master?token=&expires=&h=1&lang=en.
+   * Fast (~1s API). English default (+Italian alt, app plays default only). */
+  var VIX = 'https://vixsrc.to';
+  function vixApiUrl(kind, id, season, episode) {
+    if (kind === 'tv') return VIX + '/api/tv/' + id + '/' + (season || 1) + '/' + (episode || 1);
+    return VIX + '/api/movie/' + id;
+  }
+
+  function vixParseEmbed(html) {
+    var urls = [];
+    var re = /"url":"(https:[^"]*?playlist[^"]*?)"/g, m;
+    while ((m = re.exec(html)) !== null) {
+      urls.push(m[1].split('\\/').join('/').split('\\u0026').join('&'));
+    }
+    var token = (html.match(/'token':\s*'([0-9a-f]+)'/) || [])[1] || '';
+    var expires = (html.match(/'expires':\s*'(\d+)'/) || [])[1] || '';
+    return { urls: urls, token: token, expires: expires };
+  }
+
+  function vixBestQuality(masterText) {
+    var best = 0, re = /RESOLUTION=\d+x(\d+)/g, m;
+    while ((m = re.exec(masterText)) !== null) {
+      var h = parseInt(m[1], 10);
+      if (h > best) best = h;
+    }
+    return best > 0 ? (best + 'p') : 'Auto';
+  }
+
+  function vixReadHost(kind, tmdbId, season, episode, serverIdx, langCode) {
+    if (!tmdbId) return Promise.reject(new Error('vixsrc: no tmdb id'));
+    var key = nmCacheKey('vix', kind, String(tmdbId), langCode || 'en', season, episode);
+    var hit = nmCacheGet(key);
+    if (hit) return Promise.resolve(hit);
+    var pageUrl = kind === 'tv'
+      ? VIX + '/tv/' + tmdbId + '/' + (season || 1) + '/' + (episode || 1)
+      : VIX + '/movie/' + tmdbId;
+    var embedRef = '';
+    var lang = langCode || 'en';
+    function buildRows(master, m3u) {
+      var best = vixBestQuality(m3u);
+      var ladder = ['1080p', '720p', '480p'];
+      var quals = ['Auto'];
+      var bi = ladder.indexOf(best);
+      if (bi >= 0) { quals = quals.concat(ladder.slice(bi)); }
+      else if (best && best !== 'Auto') { quals.push(best); }
+      return {
+        url: master,
+        headers: { 'Referer': 'https://vixsrc.to/', 'User-Agent': UA },
+        quality: 'Auto',
+        direct_quality: quals.map(function (q) { return { quality: q, file: master }; }),
+        vlc: false
+      };
+    }
+    function tryServer(p, idx) {
+      if (idx >= p.urls.length) return Promise.reject(new Error('vixsrc: all servers dead'));
+      var base = p.urls[idx];
+      var master = base + (base.indexOf('?') >= 0 ? '&' : '?') +
+        'token=' + p.token + '&expires=' + p.expires + '&h=1&lang=' + lang;
+      return fetchText(master, { 'User-Agent': UA, 'Referer': embedRef }, 10000).then(function (m3u) {
+        if (!m3u || m3u.indexOf('#EXTM3U') < 0) return tryServer(p, idx + 1);
+        var res = buildRows(master, m3u);
+        nmCacheSet(key, res);
+        return res;
+      }, function () { return tryServer(p, idx + 1); });
+    }
+    return fetchJSON(vixApiUrl(kind, tmdbId, season, episode), null, 15000).then(function (j) {
+      if (!j || !j.src) throw new Error('vixsrc: title not in catalog');
+      embedRef = VIX + j.src;
+      return fetchText(embedRef, { 'User-Agent': UA, 'Referer': pageUrl }, 15000);
+    }).then(function (html) {
+      var p = vixParseEmbed(html);
+      if (!p.urls.length || !p.token || !p.expires) throw new Error('vixsrc: embed parse failed');
+      return tryServer(p, serverIdx || 0);
+    });
+  }
+  function vxReadHost(source, tag, kind, tmdbId, season, episode) {
+    if (!tmdbId) return Promise.reject(new Error(tag + ': no tmdb id'));
+    var key = nmCacheKey(tag, kind, String(tmdbId), '', season, episode);
+    var hit = nmCacheGet(key);
+    if (hit) return Promise.resolve(hit);
+    return vxFetch(source, tmdbId, kind, season, episode).then(function (j) {
+      var sources = ((j && j.sources) || []).filter(function (s) { return s && s.url; });
+      if (!sources.length) throw new Error(tag + ': no sources');
+      function realQ(s) {
+        /* v19b: real quality lives in label for cineplay (upstream stamps
+           every source quality:1080p). '4K HDR'->2160p, '720p Hindi'->720p. */
+        var lab = String(s.label || '');
+        if (/4k|2160/i.test(lab)) return '2160p';
+        var lm = lab.match(/(\d{3,4})p/i);
+        if (lm) return lm[1] + 'p';
+        return String(s.quality || 'Auto');
+      }
+      function qn(s) { var m = String(realQ(s)).match(/(\d+)/); return m ? parseInt(m[1], 10) : 0; }
+      sources.sort(function (a, b) { return qn(b) - qn(a); });
+      var ref = (sources[0].headers && sources[0].headers.Referer) || '';
+      /* every rung is its own single-rung playlist with its own file:
+       * validate ALL in parallel (playlist + segment-hole sampling),
+       * drop holey rungs (seek would restart), one row per survivor. */
+      /* v19c: cineplay wraps rungs in workers.dev m3u8-proxy shells that go
+       * dead (CF 1027 / 429) while the inner ?url= target stays alive.
+       * Unwrap: try decoded inner URL first, fall back to wrapped URL. */
+      function unwrapProxy(u) {
+        try {
+          var su = String(u || '');
+          if (su.indexOf('m3u8-proxy') < 0) return null;
+          var m = su.match(/[?&]url=([^&]+)/);
+          if (!m) return null;
+          var inner = decodeURIComponent(m[1]);
+          if (/^https?:\/\//i.test(inner) && inner !== su) return inner;
+        } catch (_e) {}
+        return null;
+      }
+      var checks = sources.map(function (s) {
+        var r = (s.headers && s.headers.Referer) || ref;
+        var probe = function (u) {
+          return fetchText(u, { 'User-Agent': UA, 'Referer': r }, 8000).then(function (m3u) {
+            if (!m3u || m3u.indexOf('#EXTM3U') < 0) return null;
+            if (m3u.indexOf('#EXT-X-STREAM-INF') >= 0) return { s: s, holes: 0, file: u };
+            return vxSampleHoles(u, m3u, r).then(function (holes) { return { s: s, holes: holes, file: u }; }, function () { return { s: s, holes: 0, file: u }; });
+          }).then(null, function () { return null; });
+        };
+        var inner = unwrapProxy(s.url);
+        if (!inner) return probe(s.url);
+        return probe(inner).then(function (res) { return res || probe(s.url); });
+      });
+      return Promise.all(checks).then(function (results) {
+        var good = results.filter(function (x) { return !!x; });
+        if (!good.length) throw new Error(tag + ': all rungs dead');
+        var clean = good.filter(function (x) { return x.holes < 2; });
+        if (!clean.length) throw new Error(tag + ': all rungs holey');
+        var keep = clean;
+        var seen = {}, quals = [{ quality: 'Auto', file: keep[0].file || keep[0].s.url }];
+        keep.forEach(function (x) {
+          var label = realQ(x.s);
+          if (seen[label]) return;
+          seen[label] = true;
+          quals.push({ quality: label, file: x.file || x.s.url });
+        });
+        return { url: keep[0].file || keep[0].s.url, headers: { 'Referer': ref, 'User-Agent': UA }, quality: 'Auto', direct_quality: quals, vlc: false };
+      });
+    }).then(function (res) { nmCacheSet(key, res); return res; });
+  }
+
+  /* ================= Host 2: Mapple (mapple.fun) — true 4K, tokenized =================
+   * Cracked 21-Sep-2026 (see workspace mapple_ref.kt). Multi-hoster: each source
+   * key has its own catalog; 'playback-unavailable' flakes are normal — fall to
+   * the next hoster. Playback needs Referer: https://mapple.fun/ on every URL. */
+  var MP_BASE = 'https://mapple.fun';
+  var MP_HOSTERS = ['mapple', 's25', 's2', 's4', 's19'];
+  /* Manual cookie jar: the _mapple_site session cookie is set by the watch
+     warm-up GET and ROTATED by every API response. Keeping it ourselves makes
+     the lane independent of the platform's fetch cookie storage. */
+  var MP_JAR = {};
+  function mpAbsorb(res) {
+    try {
+      var raw = '';
+      if (res && res.headers) {
+        if (typeof res.headers.getSetCookie === 'function') {
+          raw = res.headers.getSetCookie().join('\n');
+        } else if (typeof res.headers.get === 'function') {
+          raw = String(res.headers.get('set-cookie') || '');
+        }
+      }
+      var m;
+      var re = /(_mapple_site(?:_partitioned)?)=([^;\n,]*)/g;
+      while ((m = re.exec(raw)) !== null) MP_JAR[m[1]] = m[2];
+    } catch (_e) {}
+  }
+  function mpCookieHeader() {
+    var parts = [];
+    for (var k in MP_JAR) {
+      if (Object.prototype.hasOwnProperty.call(MP_JAR, k)) parts.push(k + '=' + MP_JAR[k]);
+    }
+    return parts.join('; ');
+  }
+  var MP_K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+  ];
+  function mpRor(x, n) { return (x >>> n) | (x << (32 - n)); }
+  function mpSha256(bytes) {
+    var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    var msg = bytes.slice();
+    var bitLen = msg.length * 8;
+    msg.push(0x80);
+    while (msg.length % 64 !== 56) msg.push(0);
+    msg.push(0, 0, 0, 0);
+    msg.push((bitLen >>> 24) & 255, (bitLen >>> 16) & 255, (bitLen >>> 8) & 255, bitLen & 255);
+    var w = new Array(64);
+    for (var off = 0; off < msg.length; off += 64) {
+      for (var i = 0; i < 16; i++) {
+        w[i] = (msg[off + i * 4] << 24) | (msg[off + i * 4 + 1] << 16) | (msg[off + i * 4 + 2] << 8) | msg[off + i * 4 + 3];
+      }
+      for (i = 16; i < 64; i++) {
+        var s0 = mpRor(w[i - 15], 7) ^ mpRor(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+        var s1 = mpRor(w[i - 2], 17) ^ mpRor(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+      }
+      var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+      for (i = 0; i < 64; i++) {
+        var S1 = mpRor(e, 6) ^ mpRor(e, 11) ^ mpRor(e, 25);
+        var ch = (e & f) ^ (~e & g);
+        var t1 = (h + S1 + ch + MP_K[i] + w[i]) | 0;
+        var S0 = mpRor(a, 2) ^ mpRor(a, 13) ^ mpRor(a, 22);
+        var mj = (a & b) ^ (a & c) ^ (b & c);
+        var t2 = (S0 + mj) | 0;
+        h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+      H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+    }
+    var out = [];
+    for (var k = 0; k < 8; k++) {
+      out.push((H[k] >>> 24) & 255, (H[k] >>> 16) & 255, (H[k] >>> 8) & 255, H[k] & 255);
+    }
+    return out;
+  }
+  function mpStrBytes(str) {
+    var out = [];
+    for (var i = 0; i < str.length; i++) {
+      var c = str.charCodeAt(i);
+      if (c < 0x80) out.push(c);
+      else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+      else out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    }
+    return out;
+  }
+  function mpZeroBits(bytes) {
+    var count = 0;
+    for (var i = 0; i < bytes.length; i++) {
+      var u = bytes[i];
+      if (u === 0) { count += 8; continue; }
+      for (var bit = 7; bit >= 0; bit--) {
+        if (u & (1 << bit)) return count;
+        count++;
+      }
+    }
+    return count;
+  }
+  function mpCompressBlock(state, w, K) {
+    var i, a = state[0], b = state[1], c = state[2], d = state[3],
+        e = state[4], f = state[5], g = state[6], hh = state[7];
+    for (i = 0; i < 64; i++) {
+      if (i >= 16) {
+        var w15 = w[i - 15], w2 = w[i - 2];
+        var s0 = ((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3);
+        var s1 = ((w2 >>> 17) | (w2 << 15)) ^ ((w2 >>> 19) | (w2 << 13)) ^ (w2 >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+      }
+      var S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      var chx = (e & f) ^ (~e & g);
+      var t1 = (hh + S1 + chx + K[i] + w[i]) | 0;
+      var S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      var mj = (a & b) ^ (a & c) ^ (b & c);
+      var t2 = (S0 + mj) | 0;
+      hh = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+    }
+    return [(state[0] + a) | 0, (state[1] + b) | 0, (state[2] + c) | 0, (state[3] + d) | 0,
+            (state[4] + e) | 0, (state[5] + f) | 0, (state[6] + g) | 0, (state[7] + hh) | 0];
+  }
+  function mpSolvePow(challenge, difficulty) {
+    var ch = mpStrBytes(String(challenge));
+    var MAX = 20000000;
+    if (ch.length !== 64 || difficulty > 32) {
+      /* generic slow path (rare shapes) */
+      for (var n0 = 0; n0 < MAX; n0++) {
+        var hv = mpSha256(ch.concat(mpStrBytes(String(n0))));
+        if (mpZeroBits(hv) >= difficulty) return String(n0);
+      }
+      throw new Error('mp: pow unsolved');
+    }
+    /* FAST PATH: the challenge fills exactly one SHA-256 block, so its
+       compression midstate is computed ONCE. Each nonce then compresses a
+       single padded block. difficulty <= 32 means only the first digest
+       word decides the outcome: leading zeros >= difficulty  <=>  (unsigned)
+       first word < 2^(32-difficulty). ~10-30x faster than the generic loop. */
+    var K = MP_K;
+    var i;
+    var w1 = new Array(64);
+    for (i = 0; i < 16; i++) w1[i] = (ch[i * 4] << 24) | (ch[i * 4 + 1] << 16) | (ch[i * 4 + 2] << 8) | ch[i * 4 + 3];
+    var mid = mpCompressBlock([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19], w1, K);
+    var target = Math.pow(2, 32 - difficulty);
+    var b2 = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+    b2[14] = 0;
+    var nonce = 0;
+    while (nonce < MAX) {
+      var ns = String(nonce);
+      var L = ns.length;
+      b2[0] = 0; b2[1] = 0; b2[2] = 0;
+      for (var k = 0; k < L; k++) b2[k >> 2] |= ns.charCodeAt(k) << (24 - (k & 3) * 8);
+      b2[L >> 2] |= 0x80 << (24 - (L & 3) * 8);
+      b2[15] = ((64 + L) * 8) | 0;
+      var st = mpCompressBlock(mid, b2, K);
+      if ((st[0] >>> 0) < target) return ns;
+      nonce++;
+    }
+    throw new Error('mp: pow unsolved');
+  }
+  function mpPost(path, body) {
+    var headers = { 'User-Agent': UA, 'Content-Type': 'application/json', 'Accept': '*/*', 'Origin': MP_BASE, 'Referer': MP_BASE + '/' };
+    var ck = mpCookieHeader();
+    if (ck) headers['Cookie'] = ck;
+    var opts = { method: 'POST', headers: headers };
+    if (body !== null) opts.body = JSON.stringify(body);
+    return fetchWithTimeout(MP_BASE + path, opts, 15000).then(function (res) {
+      mpAbsorb(res);
+      if (!res.ok) throw new Error('mp http ' + res.status);
+      return res.json();
+    });
+  }
+  function mpBuildRows(masterUrl, m3u) {
+    var lines = m3u.split(/\r?\n/);
+    var quals = [{ quality: 'Auto', file: masterUrl }];
+    var seen = {};
+    for (var i = 0; i < lines.length; i++) {
+      var line = String(lines[i] || '').trim();
+      if (line.indexOf('#EXT-X-STREAM-INF') !== 0) continue;
+      var m = line.match(/RESOLUTION=\d+x(\d+)/);
+      var next = String(lines[i + 1] || '').trim();
+      if (!m || !next || next.charAt(0) === '#') continue;
+      var file = /^https?:\/\//i.test(next) ? next : vxResolveSeg(masterUrl, next);
+      if (!file) continue;
+      var label = m[1] + 'p';
+      if (seen[label]) continue;
+      seen[label] = true;
+      quals.push({ quality: label, file: file });
+    }
+    if (quals.length < 2) throw new Error('mp: master has no variants');
+    quals.sort(function (a, b) {
+      if (a.quality === 'Auto') return -1;
+      if (b.quality === 'Auto') return 1;
+      return (parseInt(b.quality, 10) || 0) - (parseInt(a.quality, 10) || 0);
+    });
+    return { url: masterUrl, headers: { 'Referer': MP_BASE + '/', 'User-Agent': UA }, quality: 'Auto', direct_quality: quals, vlc: false };
+  }
+  /* Query one hoster; resolves to its row-set, or null on any miss. */
+  function mpQueryHoster(tok, mediaType, tvSlug, tmdbId, source) {
+    return mpPost('/api/encrypt', {
+      data: { mediaId: tmdbId | 0, mediaType: mediaType, tv_slug: tvSlug, source: source },
+      endpoint: 'stream-encrypted',
+      requestToken: tok.requestToken
+    }).then(function (enc) {
+      if (!enc || !enc.url) throw new Error('mp: encrypt');
+      var sep = String(enc.url).indexOf('?') >= 0 ? '&' : '?';
+      var u = MP_BASE + enc.url + sep + 'requestToken=' + encodeURIComponent(tok.requestToken) + '&token=' + encodeURIComponent(tok.playbackToken);
+      var sh = { 'User-Agent': UA, 'Referer': MP_BASE + '/', 'Origin': MP_BASE, 'Accept': '*/*' };
+      var sck = mpCookieHeader();
+      if (sck) sh['Cookie'] = sck;
+      return fetchJSON(u, sh, 15000);
+    }).then(function (st) {
+      if (!st || !st.success || !st.data || !st.data.stream_url) throw new Error('mp: stream unavailable');
+      var su = String(st.data.stream_url);
+      if (su.indexOf('playback-unavailable') >= 0) throw new Error('mp: unavailable');
+      return fetchText(su, { 'User-Agent': UA, 'Referer': MP_BASE + '/' }, 15000).then(function (m3u) {
+        if (!m3u || m3u.indexOf('#EXTM3U') < 0 || m3u.indexOf('#EXT-X-STREAM-INF') < 0) throw new Error('mp: bad master');
+        return mpBuildRows(su, m3u);
+      });
+    }).then(function (rows) { return rows; }, function () { return null; });
+  }
+  /* Fan out to ALL hosters in parallel, return the set with the HIGHEST top
+     rung (ties: more rows wins). This matches the web player, which always
+     plays the best available quality instead of the first hoster. */
+  function mpBestHoster(tok, mediaType, tvSlug, tmdbId) {
+    var jobs = MP_HOSTERS.map(function (source) {
+      return mpQueryHoster(tok, mediaType, tvSlug, tmdbId, source);
+    });
+    return Promise.all(jobs).then(function (results) {
+      var best = null, bestTop = -1, bestRows = -1;
+      for (var i = 0; i < results.length; i++) {
+        var rows = results[i];
+        if (!rows || !rows.direct_quality) continue;
+        var top = 0;
+        for (var q = 0; q < rows.direct_quality.length; q++) {
+          var n = parseInt(rows.direct_quality[q].quality, 10);
+          if (!isNaN(n) && n > top) top = n;
+        }
+        var cnt = rows.direct_quality.length;
+        if (top > bestTop || (top === bestTop && cnt > bestRows)) {
+          bestTop = top; bestRows = cnt; best = rows;
+        }
+      }
+      if (!best) return Promise.reject(new Error('mp: no hoster had it'));
+      return best;
+    });
+  }
+  function mpReadHost(kind, tmdbId, season, episode) {
+    if (!tmdbId) return Promise.reject(new Error('mp: no tmdb id'));
+    var key = nmCacheKey('mp', kind, String(tmdbId), '', season, episode);
+    var hit = nmCacheGet(key);
+    if (hit) return Promise.resolve(hit);
+    var mediaType = kind === 'tv' ? 'tv' : 'movie';
+    var tvSlug = kind === 'tv' ? ((season || 1) + '-' + (episode || 1)) : '';
+    var watchPath = kind === 'tv'
+      ? '/watch/tv/' + tmdbId + '-' + (season || 1) + '-' + (episode || 1)
+      : '/watch/movie/' + tmdbId;
+    /* warm the playback session first — the _mapple_site cookie set by this
+       GET is required for the API calls that follow (iOS fetch carries it). */
+    MP_JAR = {};
+    return fetchWithTimeout(MP_BASE + watchPath, { headers: { 'User-Agent': UA } }, 12000)
+      .then(function (r) { mpAbsorb(r); return r.text(); }, function () { return ''; })
+      .then(function () { return mpPost('/api/request-token', null); })
+      .then(function (j) {
+        if (!j || !j.token) throw new Error('mp: request-token');
+        var requestToken = j.token;
+        var init = { mediaId: tmdbId | 0, mediaType: mediaType, tv_slug: tvSlug, requestToken: requestToken };
+        return mpPost('/api/playback-init', init).then(function (r1) {
+          if (r1 && r1.token) return { requestToken: requestToken, playbackToken: r1.token };
+          if (!r1 || !r1.requiresPow || !r1.pow) throw new Error('mp: init rejected');
+          var nonce = mpSolvePow(r1.pow.challenge, r1.pow.difficulty);
+          init.pow = { challengeId: r1.pow.challengeId, nonce: nonce };
+          return mpPost('/api/playback-init', init).then(function (r2) {
+            if (!r2 || !r2.token) throw new Error('mp: init+pow rejected');
+            return { requestToken: requestToken, playbackToken: r2.token };
+          });
+        });
+      })
+      .then(function (tok) { return mpBestHoster(tok, mediaType, tvSlug, tmdbId); })
+      .then(function (res) { nmCacheSet(key, res); return res; });
+  }
+
+  /* ---- base64 helpers (no Buffer/atob dependency) ---- */
+  var B64_STD = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+  function b64dec(s) {
+    s = String(s || '').replace(/[^A-Za-z0-9+/=]/g, '');
+    while (s.length % 4) s += '=';
+    var out = [], i = 0;
+    while (i < s.length) {
+      var e1 = B64_STD.indexOf(s.charAt(i++)), e2 = B64_STD.indexOf(s.charAt(i++));
+      var e3 = B64_STD.indexOf(s.charAt(i++)), e4 = B64_STD.indexOf(s.charAt(i++));
+      var n = (e1 << 18) | (e2 << 12) | ((e3 & 63) << 6) | (e4 & 63);
+      out.push((n >> 16) & 255);
+      if (e3 !== 64) out.push((n >> 8) & 255);
+      if (e4 !== 64) out.push(n & 255);
+    }
+    return out;
+  }
+  var B64_URLC = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  function b64urlEnc(bytes) {
+    var out = '', i, b0, b1, b2, n;
+    for (i = 0; i < bytes.length; i += 3) {
+      b0 = bytes[i] & 255; b1 = i + 1 < bytes.length ? bytes[i + 1] & 255 : 0; b2 = i + 2 < bytes.length ? bytes[i + 2] & 255 : 0;
+      n = (b0 << 16) | (b1 << 8) | b2;
+      out += B64_URLC.charAt((n >> 18) & 63) + B64_URLC.charAt((n >> 12) & 63);
+      if (i + 1 < bytes.length) out += B64_URLC.charAt((n >> 6) & 63);
+      if (i + 2 < bytes.length) out += B64_URLC.charAt(n & 63);
+    }
+    return out;
+  }
+
+  /* ---- pure-JS crypto_secretbox (XSalsa20-Poly1305). Byte-verified
+   * against libsodium on mint + random vectors. Poly uses BigInt
+   * (call-form only, so engines without it still parse). ---- */
+  function sbRotl(v, n) { v = v >>> 0; return ((v << n) | (v >>> (32 - n))) >>> 0; }
+  function sbAdd(a, b) { return ((a >>> 0) + (b >>> 0)) >>> 0; }
+  function sbQR(x, a, b, c, d) {
+    x[b] = (x[b] ^ sbRotl(sbAdd(x[a], x[d]), 7)) >>> 0;
+    x[c] = (x[c] ^ sbRotl(sbAdd(x[b], x[a]), 9)) >>> 0;
+    x[d] = (x[d] ^ sbRotl(sbAdd(x[c], x[b]), 13)) >>> 0;
+    x[a] = (x[a] ^ sbRotl(sbAdd(x[d], x[c]), 18)) >>> 0;
+  }
+  function sbRounds(x) {
+    for (var i = 0; i < 10; i++) {
+      sbQR(x, 0, 4, 8, 12); sbQR(x, 5, 9, 13, 1); sbQR(x, 10, 14, 2, 6); sbQR(x, 15, 3, 7, 11);
+      sbQR(x, 0, 1, 2, 3); sbQR(x, 5, 6, 7, 4); sbQR(x, 10, 11, 8, 9); sbQR(x, 15, 12, 13, 14);
+    }
+  }
+  var SB_SIGMA = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
+  function sbLoad32(a, i) { return (a[i] | (a[i + 1] << 8) | (a[i + 2] << 16) | (a[i + 3] << 24)) >>> 0; }
+  function sbStore32(a, i, v) { v = v >>> 0; a[i] = v & 255; a[i + 1] = (v >>> 8) & 255; a[i + 2] = (v >>> 16) & 255; a[i + 3] = (v >>> 24) & 255; }
+  function sbHSalsa20(nonce16, key32) {
+    var x = [SB_SIGMA[0], sbLoad32(key32, 0), sbLoad32(key32, 4), sbLoad32(key32, 8), sbLoad32(key32, 12),
+      SB_SIGMA[1], sbLoad32(nonce16, 0), sbLoad32(nonce16, 4), sbLoad32(nonce16, 8), sbLoad32(nonce16, 12),
+      SB_SIGMA[2], sbLoad32(key32, 16), sbLoad32(key32, 20), sbLoad32(key32, 24), sbLoad32(key32, 28), SB_SIGMA[3]];
+    sbRounds(x);
+    var idx = [0, 5, 10, 15, 6, 7, 8, 9], o = [];
+    for (var i = 0; i < 8; i++) sbStore32(o, i * 4, x[idx[i]]);
+    return o;
+  }
+  function sbSalsaXor(out, inp, len, nonce8, ctr0, key32) {
+    var k = [sbLoad32(key32, 0), sbLoad32(key32, 4), sbLoad32(key32, 8), sbLoad32(key32, 12), sbLoad32(key32, 16), sbLoad32(key32, 20), sbLoad32(key32, 24), sbLoad32(key32, 28)];
+    var n0 = sbLoad32(nonce8, 0), n1 = sbLoad32(nonce8, 4);
+    var pos = 0, ctr = ctr0 >>> 0;
+    while (pos < len) {
+      var x = [SB_SIGMA[0], k[0], k[1], k[2], k[3], SB_SIGMA[1], n0, n1, ctr, 0, SB_SIGMA[2], k[4], k[5], k[6], k[7], SB_SIGMA[3]];
+      var z = x.slice(0);
+      sbRounds(x);
+      var ks = [];
+      for (var i = 0; i < 16; i++) sbStore32(ks, i * 4, sbAdd(x[i], z[i]));
+      for (var j = 0; j < 64 && pos < len; j++, pos++) out[pos] = (inp[pos] ^ ks[j]) & 255;
+      ctr = sbAdd(ctr, 1);
+    }
+    return out;
+  }
+  function sbLeBytes(a, o, n) { var v = BigInt(0); for (var i = n - 1; i >= 0; i--) v = (v << BigInt(8)) + BigInt(a[o + i]); return v; }
+  function sbPoly1305(msg, key32) {
+    var P = (BigInt(1) << BigInt(130)) - BigInt(5);
+    var r = sbLeBytes(key32, 0, 16) & BigInt('0xffffffc0ffffffc0ffffffc0fffffff');
+    var s = sbLeBytes(key32, 16, 16);
+    var acc = BigInt(0), i = 0;
+    while (i < msg.length) {
+      var bl = Math.min(16, msg.length - i);
+      var n = sbLeBytes(msg, i, bl) + (BigInt(1) << BigInt(8 * bl));
+      acc = ((acc + n) * r) % P;
+      i += bl;
+    }
+    acc = (acc + s) % (BigInt(1) << BigInt(128));
+    var out = [];
+    for (var j = 0; j < 16; j++) { out.push(Number(acc & BigInt(255))); acc = acc >> BigInt(8); }
+    return out;
+  }
+  function sbSecretboxEasy(msgArr, nonce24, key32) {
+    var subkey = sbHSalsa20(nonce24.slice(0, 16), key32);
+    var padded = [], i;
+    for (i = 0; i < 32; i++) padded.push(0);
+    for (i = 0; i < msgArr.length; i++) padded.push(msgArr[i] & 255);
+    var stream = new Array(padded.length);
+    sbSalsaXor(stream, padded, padded.length, nonce24.slice(16, 24), 0, subkey.slice(0, 32));
+    var polyKey = stream.slice(0, 32), ct = stream.slice(32);
+    return sbPoly1305(ct, polyKey).concat(ct);
+  }
+
+  /* ---- short-TTL cache (signed/tokenized URLs: 5 min) ---- */
+  var VL_CACHE = {};
+  var VL_CACHE_TTL = 5 * 60 * 1000;
+  function vlCacheGet(key) {
+    var e = VL_CACHE[key];
+    if (e && e.exp > Date.now()) return e.val;
+    if (e) delete VL_CACHE[key];
+    return null;
+  }
+  function vlCacheSet(key, val) { VL_CACHE[key] = { val: val, exp: Date.now() + VL_CACHE_TTL }; }
+
+  /* ================= Host 5: VidLink (secretbox adv mint) =================
+   * Cracked: Go-WASM getAdv = secretbox_easy(ascii(id)+u64BE(now+8),
+   * zero-nonce, embedded key); token = b64url(nonce||box). 'standard'
+   * env returns direct mp4 qualities (requiresProxy -> mooncase /mp). */
+  var VL_API = 'https://vidlink.pro/api/b';
+  var VL_KEY = [0xc7, 0x51, 0x36, 0xc5, 0x66, 0x8b, 0xbf, 0xe6, 0x5a, 0x7e, 0xca, 0xd4, 0x31, 0xa7, 0x45, 0xdb,
+    0x68, 0xb5, 0xf3, 0x81, 0x55, 0x5b, 0x38, 0xd8, 0xf6, 0xc6, 0x99, 0x44, 0x9c, 0xf1, 0x1f, 0xcd];
+  function vlMint(tmdbId) {
+    if (typeof BigInt === 'undefined') throw new Error('vl: bigint unsupported');
+    var idS = String(tmdbId), msg = [], i;
+    for (i = 0; i < idS.length; i++) msg.push(idS.charCodeAt(i) & 255);
+    var t = Math.floor(Date.now() / 1000) + 8;
+    var hi = Math.floor(t / 4294967296), lo = t >>> 0;
+    msg.push((hi >>> 24) & 255, (hi >>> 16) & 255, (hi >>> 8) & 255, hi & 255,
+      (lo >>> 24) & 255, (lo >>> 16) & 255, (lo >>> 8) & 255, lo & 255);
+    var nonce = [];
+    for (i = 0; i < 24; i++) nonce.push(0);
+    return b64urlEnc(nonce.concat(sbSecretboxEasy(msg, nonce, VL_KEY)));
+  }
+  function vlPage(kind, tmdbId, season, episode) {
+    if (kind === 'tv') return 'https://vidlink.pro/tv/' + tmdbId + '/' + (season || 1) + '/' + (episode || 1);
+    return 'https://vidlink.pro/movie/' + tmdbId;
+  }
+  /* D() mp-path replica: keep auth-ish params, add headers+host. */
+  function vlProxyUrl(raw) {
+    var u = String(raw || '');
+    var qAt = u.indexOf('?');
+    var base = qAt < 0 ? u : u.slice(0, qAt);
+    var query = qAt < 0 ? '' : u.slice(qAt + 1);
+    var schemeEnd = base.indexOf('://');
+    var restStart = schemeEnd + 3;
+    var slashAt = base.indexOf('/', restStart);
+    var origin = slashAt < 0 ? base : base.slice(0, slashAt);
+    var path = slashAt < 0 ? '/' : base.slice(slashAt);
+    var kept = [], pairs = query.split('&'), i;
+    for (i = 0; i < pairs.length; i++) {
+      var kv = pairs[i];
+      if (!kv) continue;
+      var eq = kv.indexOf('=');
+      var k = (eq < 0 ? kv : kv.slice(0, eq)).toLowerCase();
+      if (k === 'auth' || k === 'expires' || k === 'hash' || k === 'key' || k === 'sign' || k === 't' || k === 'token') kept.push(kv);
+    }
+    kept.push('headers=' + encodeURIComponent('{}'));
+    kept.push('host=' + encodeURIComponent(origin));
+    return 'https://noon.mooncase.online/mp' + path + '?' + kept.join('&');
+  }
+  function vlProbe(fileUrl, referer) {
+    return fetchWithTimeout(fileUrl, { headers: { 'User-Agent': UA, 'Referer': referer || '', 'Range': 'bytes=0-0' } }, 8000).then(function (res) {
+      try { if (res && res.body && res.body.cancel) res.body.cancel(); } catch (_e) {}
+      if (!res) return 'unknown';
+      var st = res.status || 0;
+      if (st === 200 || st === 206) return 'alive';
+      if (st === 403 || st === 404 || st === 410 || st === 416) return 'dead';
+      return 'unknown';
+    }, function () { return 'unknown'; });
+  }
+  function vlReadHost(kind, tmdbId, season, episode) {
+    if (!tmdbId) return Promise.reject(new Error('vl: no tmdb id'));
+    var key = nmCacheKey('vl', kind, String(tmdbId), '', season, episode);
+    var hit = vlCacheGet(key);
+    if (hit) return Promise.resolve(hit);
+    var adv;
+    try { adv = vlMint(tmdbId); } catch (e) { return Promise.reject(e); }
+    var page = vlPage(kind, tmdbId, season, episode);
+    var path = kind === 'tv' ? '/tv/' + adv + '/' + (season || 1) + '/' + (episode || 1) : '/movie/' + adv;
+    return fetchJSON(VL_API + path + '?multiLang=1',
+      { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': page, 'X-Playback-Environment': 'standard' }, 15000).then(function (j) {
+      if (!j || !j.stream || !j.stream.qualities) throw new Error('vl: miss');
+      var qs = j.stream.qualities, labels = Object.keys(qs), entries = [], i;
+      for (i = 0; i < labels.length; i++) {
+        var q = qs[labels[i]];
+        if (!q || !q.url || (q.type && q.type !== 'mp4')) continue;
+        var m = String(labels[i]).match(/(\d+)/);
+        entries.push({ label: /^\d+$/.test(labels[i]) ? labels[i] + 'p' : String(labels[i]), num: m ? parseInt(m[1], 10) : 0, url: q.url, px: q.requiresProxy === true });
+      }
+      if (!entries.length) throw new Error('vl: no mp4');
+      entries.sort(function (a, b) { return b.num - a.num; });
+      var jobs = entries.map(function (en) {
+        var file = en.url; /* DIRECT: mooncase proxy is CF-walled/dead everywhere -> bypass; native app has no CORS anyway */
+        return vlProbe(file, page).then(function (st) { return { en: en, file: file, st: st }; }, function () { return { en: en, file: file, st: 'unknown' }; });
+      });
+      return Promise.all(jobs).then(function (rs) {
+        var good = rs.filter(function (x) { return x.st !== 'dead'; });
+        if (!good.length) throw new Error('vl: all dead');
+        var dq = [{ quality: 'Auto', file: good[0].file }];
+        for (var k = 0; k < good.length; k++) dq.push({ quality: good[k].en.label, file: good[k].file });
+        return { url: good[0].file, headers: { 'Referer': page, 'User-Agent': UA }, quality: 'Auto', direct_quality: dq, vlc: false };
+      });
+    }).then(function (res) { vlCacheSet(key, res); return res; });
+  }
+
+  /* ================= Host 4: VidSrc (api + wasm + per-host token) =================
+   * Cracked: api.php?type=&tmdb=&stream_urls -> ChaCha20-closed wasm decrypt
+   * (run their per-5min wasm) -> urls -> {origin}/generate.php JWT ->
+   * master+token -> validateLadder. Needs WebAssembly (feature-detected). */
+  var VSM_API = 'https://data.vidsrcme.ru/api.php';
+  var VSM_REF = 'https://cloudorchestranova.com/';
+  function vsmRunDecrypt(encB64, wasmBytes) {
+    if (typeof WebAssembly === 'undefined') return Promise.reject(new Error('vsm: wasm unsupported'));
+    var enc = b64dec(encB64);
+    var code;
+    try { code = new Uint8Array(wasmBytes); } catch (e) { return Promise.reject(e); }
+    return WebAssembly.compile(code).then(function (mod) { return WebAssembly.instantiate(mod, {}); }).then(function (inst) {
+      var ex = inst.exports;
+      var ptr = ex.alloc(enc.length);
+      new Uint8Array(ex.memory.buffer, ptr, enc.length).set(enc);
+      var outLen = ex.decrypt(ptr, enc.length);
+      var view = new Uint8Array(ex.memory.buffer, ptr + 12, outLen);
+      var txt = '', i;
+      for (i = 0; i < view.length; i++) txt += String.fromCharCode(view[i]);
+      return txt.split('\n').filter(Boolean);
+    });
+  }
+  function vsmFetchWasm(vs) {
+    if (vs && vs.wasm) return Promise.resolve(b64dec(vs.wasm));
+    var url = vs && vs.wasm_url;
+    if (!url) return Promise.reject(new Error('vsm: no wasm'));
+    return fetchWithTimeout(url, { headers: { 'User-Agent': UA } }, 15000).then(function (res) {
+      if (!res.ok) throw new Error('vsm: wasm http ' + res.status);
+      return res.arrayBuffer();
+    });
+  }
+  function vsmTryUrl(raw) {
+    var r = String(raw);
+    var schemeEnd = r.indexOf('://');
+    var slashAt = r.indexOf('/', schemeEnd + 3);
+    var origin = slashAt < 0 ? r : r.slice(0, slashAt);
+    return fetchText(origin + '/generate.php', { 'User-Agent': UA }, 10000).then(function (tk) {
+      tk = String(tk || '').trim();
+      if (!tk) throw new Error('vsm: empty token');
+      var stamped = r.indexOf('__TOKEN__') > -1 ? r.split('__TOKEN__').join(tk) : r + (r.indexOf('?') > -1 ? '&' : '?') + 'token=' + encodeURIComponent(tk);
+      return validateLadder(stamped, VSM_REF, 'vsm');
+    });
+  }
+  function vsmReadHost(kind, tmdbId, season, episode) {
+    if (!tmdbId) return Promise.reject(new Error('vsm: no tmdb id'));
+    if (typeof WebAssembly === 'undefined') return Promise.reject(new Error('vsm: wasm unsupported'));
+    var key = nmCacheKey('vsm', kind, String(tmdbId), '', season, episode);
+    var hit = vlCacheGet(key);
+    if (hit) return Promise.resolve(hit);
+    var apiUrl = VSM_API + '?type=' + kind + '&tmdb=' + encodeURIComponent(String(tmdbId)) +
+      (kind === 'tv' ? '&season=' + (season || 1) + '&episode=' + (episode || 1) : '') + '&stream_urls';
+    return fetchJSON(apiUrl, { 'User-Agent': UA, 'Accept': 'application/json' }, 15000).then(function (j) {
+      if (!j || String(j.status_code) !== '200' || !j.data || typeof j.data.stream_urls !== 'string') throw new Error('vsm: miss');
+      return vsmFetchWasm(j.vs).then(function (wbytes) { return vsmRunDecrypt(j.data.stream_urls, wbytes); }).then(function (urls) {
+        if (!urls.length) throw new Error('vsm: no urls');
+        var chain = Promise.reject(new Error('vsm: try next'));
+        urls.forEach(function (u) { chain = chain.then(null, function () { return vsmTryUrl(u); }); });
+        return chain;
+      });
+    }).then(function (res) { vlCacheSet(key, res); return res; });
+  }
+
+  /* ---------------- hosts ---------------- */
+  function kindOf(type) {
+    return /tv|show|series/i.test(String(type || '')) ? 'tv' : 'movie';
+  }
+
+  function getHosts(args) {
+    try { globalThis._dg = (globalThis._dg || '') + ' >V20'; } catch (_e) { }
+    args = args || {};
+    var detail = args.detail || {};
+    var kind = kindOf(args.type);
+    var tmdbId = detail.id;
+    var season = args.season, episode = args.episode;
+    var tag = kind + '-' + tmdbId + '-' + (season || 0) + '-' + (episode || 0);
+
+    var hosts = [
+      {
+        id: 'nmmulti-' + tag,
+        name: 'NetMirror',
+        desc: 'Multi-Audio • All Dubs',
+        rank: 1,
+        language: 'Other',
+        readHost: function () {
+          try {
+            if (!tmdbId) return Promise.reject(new Error('no tmdb id'));
+            return nmmultiReadHost(kind, tmdbId, season, episode);
+          } catch (e) { return Promise.reject(e); }
+        }
+      },
+      {
+        id: 'mapple-' + tag,
+        name: 'Mapple-4K',
+        desc: '4K • Movies+TV',
+        rank: 2,
+        language: 'Other',
+        readHost: function () {
+          try { return mpReadHost(kind, tmdbId, season || 1, episode || 1); }
+          catch (e) { return Promise.reject(e); }
+        }
+      },
+      {
+        id: 'movy-' + tag,
+        name: 'Vidrack-4K',
+        desc: '4K • English',
+        rank: 3,
+        language: 'Other',
+        readHost: function () {
+          try { return vxReadHost('movy', 'movy', kind, tmdbId, season || 1, episode || 1); }
+          catch (e) { return Promise.reject(e); }
+        }
+      },
+      {
+        id: 'vidsrc-' + tag,
+        name: 'VidSrc',
+        desc: '1080p • HLS',
+        rank: 4,
+        language: 'Other',
+        readHost: function () {
+          try { return vsmReadHost(kind, tmdbId, season || 1, episode || 1); }
+          catch (e) { return Promise.reject(e); }
+        }
+      },
+      {
+        id: 'vidlink-' + tag,
+        name: 'VidLink',
+        desc: '1080p • MP4',
+        rank: 5,
+        language: 'Other',
+        readHost: function () {
+          try { return vlReadHost(kind, tmdbId, season || 1, episode || 1); }
+          catch (e) { return Promise.reject(e); }
+        }
+      },
+      {
+        id: 'vixsrc-' + tag,
+        name: 'VixSrc',
+        desc: 'English \u2022 720p HLS',
+        rank: 6,
+        language: 'English',
+        readHost: function () {
+          try { return vixReadHost(kind, tmdbId, season || 1, episode || 1, 0, 'en'); }
+          catch (e) { return Promise.reject(e); }
+        }
+      }
+    ];
+
+    try {
+      if (typeof args.callback === 'function') args.callback(hosts);
+    } catch (e) { /* adapter guards its own callback */ }
+    return Promise.resolve(hosts);
+  }
+
+  /* ---------------- subtitles (sub.1x2.space) ---------------- */
+  function subsApiUrl(ids, isTV) {
+    if (isTV) return 'https://sub.1x2.space/api/tv/' + ids.tmdb_id + '/' + (ids.season || 1) + '/' + (ids.episode || 1);
+    return 'https://sub.1x2.space/api/movie/' + ids.tmdb_id;
+  }
+
+  function searchSubtitle(ids, langObj, cb) {
+    /* V19: subtitle sources removed by user request (sub.1x2.space + NetMirror
+       captions both off). Section stays; the list is always empty. Contract is
+       preserved: async cb(null, []), returns unsubscribe with promise proxies. */
+    var pr = Promise.resolve().then(function () {
+      if (typeof cb === 'function') { try { cb(null, []); } catch (_e) {} }
+      return [];
+    });
+    pr.catch(function () {});
+    function unsubscribe() {}
+    unsubscribe.then = function (a, b) { return pr.then(a, b); };
+    unsubscribe.catch = function (a) { return pr.catch(a); };
+    unsubscribe.finally = function (a) {
+      try {
+        if (typeof pr.finally === 'function') {
+          var q = pr.finally(a);
+          if (q && typeof q.catch === 'function') q.catch(function () {});
+        } else { pr.then(a, a); }
+      } catch (_e) {}
+      return unsubscribe;
+    };
+    return unsubscribe;
+  }
+
+  /* ---------------- misc contract ---------------- */
+  function translateSubs(subs) { return subs; }
+  function translateI18nFile(bundle) { return bundle; }
+  function isVlcFixThisCode() { return true; }
+
+  return {
+    getHosts: getHosts,
+    getSuportLanguages: getSuportLanguages,
+    getDefaultLanguage: getDefaultLanguage,
+    searchSubtitle: searchSubtitle,
+    translateSubs: translateSubs,
+    translateI18nFile: translateI18nFile,
+    isVlcFixThisCode: isVlcFixThisCode,
+    CaptionParser: { parseCaption: parseCaption, parse: parseCaption }
+  };
+})();
