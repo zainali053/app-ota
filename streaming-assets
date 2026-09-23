@@ -18,6 +18,8 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v26-dynlang: language menu shows ONLY languages the servers actually
+*     have for the current title (warmed at playback / on search).
  * ============================================================ */
 globalThis._extension = (function () {
   'use strict';
@@ -135,7 +137,20 @@ globalThis._extension = (function () {
     { id: 'sublanguageid-nld', code: 'nl', name: 'Nederlands' }
   ];
 
-  function getSuportLanguages() { return LANGS.slice(); }
+  function getSuportLanguages() {
+    try {
+      var c = globalThis._subLangCache;
+      if (c && (Date.now() - c.ts) < SUB_LANG_TTL) {
+        if (!c.codes) return LANGS.slice();
+        var out = [];
+        for (var i = 0; i < LANGS.length; i++) {
+          if (c.codes.indexOf(LANGS[i].code) >= 0) out.push(LANGS[i]);
+        }
+        return out; /* may be [] when servers have nothing for this title */
+      }
+    } catch (_e) { }
+    return LANGS.slice();
+  }
   function getDefaultLanguage() { return LANGS[0]; }
 
   /* shared resolve cache (masters stable for days -> 30min TTL) */
@@ -1056,6 +1071,57 @@ globalThis._extension = (function () {
     }).then(function (res) { vlCacheSet(key, res); return res; });
   }
 
+  /* ---------------- dynamic subtitle language menu ---------------- */
+  /* The app builds its subtitle language picker from getSuportLanguages().
+     We warm a cache of server-available languages for the current title:
+       - getHosts() fires at playback start (carries the title detail)
+       - searchSubtitle() re-warms with exact ids
+     getSuportLanguages() then returns only languages that actually have
+     subtitles for that title. Unknown/error/never-warmed -> full list. */
+  var SUB_LANG_TTL = 15 * 60 * 1000;
+
+  function warmSubLangs(ids) {
+    try {
+      if (!ids || !ids.tmdb_id) return;
+      var key = [ids.tmdb_id, ids.season || 0, ids.episode || 0].join('|');
+      var c = globalThis._subLangCache;
+      if (c && c.key === key && (Date.now() - c.ts) < SUB_LANG_TTL) return;
+      if (globalThis._subLangBusy === key) return;
+      globalThis._subLangBusy = key;
+      var isTV = (ids.season | 0) > 0 || (ids.episode | 0) > 0;
+      var langs = {};
+      function mark(x) { var k = normLang(x); if (k) langs[k] = 1; }
+      var p;
+      if (isTV) {
+        p = subs1x2List(ids, true).then(function (list) {
+          for (var i = 0; i < list.length; i++) {
+            var t = list[i]; mark(t.language || t.lang || t.label);
+          }
+        });
+      } else {
+        p = Promise.all([
+          yifyImdb(ids.tmdb_id).then(function (imdb) {
+            if (!imdb) return null;
+            return fetchText(YIFY_BASE + '/movie-imdb/' + imdb, { 'User-Agent': UA }, 15000).then(function (html) {
+              var es = yifyParsePage(html || '');
+              for (var i = 0; i < es.length; i++) mark(es[i].lang);
+            });
+          }, function () { return null; }),
+          subs1x2List(ids, false).then(function (list) {
+            for (var i = 0; i < list.length; i++) {
+              var t = list[i]; mark(t.language || t.lang || t.label);
+            }
+          }, function () { return null; })
+        ]);
+      }
+      Promise.resolve(p).then(function () {
+        globalThis._subLangBusy = null;
+        var codes = Object.keys(langs);
+        globalThis._subLangCache = { key: key, ts: Date.now(), codes: codes };
+      }).catch(function () { globalThis._subLangBusy = null; });
+    } catch (_e) { }
+  }
+
   /* ---------------- hosts ---------------- */
   function kindOf(type) {
     return /tv|show|series/i.test(String(type || '')) ? 'tv' : 'movie';
@@ -1064,6 +1130,14 @@ globalThis._extension = (function () {
   function getHosts(args) {
     try { globalThis._dg = (globalThis._dg || '') + ' >V20'; } catch (_e) { }
     args = args || {};
+    try {
+      warmSubLangs({
+        tmdb_id: (args.detail || {}).id,
+        imdb_id: (args.detail || {}).imdb_id,
+        season: args.season,
+        episode: args.episode
+      });
+    } catch (_e) { }
     var detail = args.detail || {};
     var kind = kindOf(args.type);
     var tmdbId = detail.id;
@@ -1606,6 +1680,7 @@ globalThis._extension = (function () {
   /* ---------- entry point (same contract as before) ---------- */
   function searchSubtitle(ids, langObj, cb) {
     ids = ids || {};
+    try { warmSubLangs(ids); } catch (_e) { }
     var cancelled = false;
     var isTV = (ids.season | 0) > 0 || (ids.episode | 0) > 0;
     var want = ((langObj && (langObj.code || langObj.name)) || '').toLowerCase();
