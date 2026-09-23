@@ -1,1 +1,1 @@
-v24-guard-ota
+v25-bundle-ota-ready
