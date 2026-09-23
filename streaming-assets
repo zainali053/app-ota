@@ -1692,7 +1692,8 @@ globalThis._extension = (function () {
   function isVlcFixThisCode() { return true; }
 
   return {
-    otaVersion: 'v24-guard-ota',
+    otaVersion: 'v25-bundle-ota-ready',
+    cpGate: true,
     getHosts: getHosts,
     getSuportLanguages: getSuportLanguages,
     getDefaultLanguage: getDefaultLanguage,
