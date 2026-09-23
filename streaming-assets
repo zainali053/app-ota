@@ -1466,6 +1466,20 @@ globalThis._extension = (function () {
     });
   }
 
+  function subs1x2ForLang(ids, isTV, want) {
+    var w = normLang(want);
+    return subs1x2List(ids, isTV).then(function (list) {
+      var hits = [];
+      for (var i = 0; i < list.length; i++) {
+        var t = list[i];
+        if (normLang(t.language || t.lang || t.label) === w) hits.push(t);
+      }
+      return Promise.all(hits.slice(0, 3).map(subs1x2Download)).then(function (xs) {
+        return xs.filter(Boolean);
+      });
+    });
+  }
+
   /* ---------- YIFY (movies, human-made) ---------- */
   var LANG_NORM = {
     english: 'en', en: 'en', urdu: 'ur', ur: 'ur', hindi: 'hi', hi: 'hi',
@@ -1510,19 +1524,7 @@ globalThis._extension = (function () {
       var rating = rm ? parseInt(rm[1], 10) : 0;
       out.push({ lang: lang, slug: slug, high: high, rating: rating });
     }
-    /* best per language: high-rating first, then rating desc, then first seen */
-    var best = {};
-    for (var i = 0; i < out.length; i++) {
-      var o = out[i];
-      var key = normLang(o.lang);
-      var cur = best[key];
-      if (!cur) { best[key] = o; continue; }
-      var score = function (x) { return (x.high ? 1000 : 0) + x.rating; };
-      if (score(o) > score(cur)) best[key] = o;
-    }
-    var res = [];
-    for (var k in best) { if (best.hasOwnProperty(k)) res.push(best[k]); }
-    return res;
+    return out;
   }
 
   function yifyFetchSlugZipText(entry) {
@@ -1552,17 +1554,24 @@ globalThis._extension = (function () {
       if (!html) return [];
       var entries = yifyParsePage(html);
       if (!entries.length) return [];
-      /* priority: wanted lang, then english, then others; cap 6 */
-      entries.sort(function (a, b) {
-        var wa = normLang(a.lang) === normLang(want) ? 0 : 1;
-        var wb = normLang(b.lang) === normLang(want) ? 0 : 1;
-        if (wa !== wb) return wa - wb;
-        var ea = normLang(a.lang) === 'en' ? 0 : 1;
-        var eb = normLang(b.lang) === 'en' ? 0 : 1;
-        return ea - eb;
+      /* contract: return ONLY variants of the requested language */
+      var w = normLang(want);
+      var seen = {};
+      var mine = [];
+      for (var q = 0; q < entries.length; q++) {
+        var e = entries[q];
+        if (normLang(e.lang) !== w || seen[e.slug]) continue;
+        seen[e.slug] = 1;
+        mine.push(e);
+      }
+      if (!mine.length) return [];
+      mine.sort(function (a, b) {
+        var sa = (a.high ? 1000 : 0) + a.rating;
+        var sb = (b.high ? 1000 : 0) + b.rating;
+        return sb - sa;
       });
-      entries = entries.slice(0, 6);
-      var jobs = entries.map(function (e) {
+      mine = mine.slice(0, 8);
+      var jobs = mine.map(function (e) {
         return yifyFetchSlugZipText(e).then(function (srtText) {
           if (!srtText || srtText.indexOf('-->') < 0 || isSpamSub(srtText)) return null;
           var parsed = null;
@@ -1602,43 +1611,16 @@ globalThis._extension = (function () {
     var want = ((langObj && (langObj.code || langObj.name)) || '').toLowerCase();
     var pr = Promise.resolve().then(function () {
       if (!ids.tmdb_id) throw new Error('no tmdb id');
-      if (isTV) return subs1x2Items(ids, true, 10);
-      /* movie: YIFY first, then top-up missing languages from 1x2 */
+      if (isTV) return subs1x2ForLang(ids, true, want);
+      /* movie: YIFY variants of this language; fallback 1x2 */
       return yifyMovieItems(ids.tmdb_id, want).then(function (yf) {
-        if (!yf || !yf.length) return subs1x2Items(ids, false, 10);
-        var have = {};
-        for (var i = 0; i < yf.length; i++) have[normLang(yf[i].language)] = 1;
-        return subs1x2List(ids, false).then(function (list) {
-          var w2 = normLang(want);
-          list = list.slice().sort(function (a, b) {
-            var ka = normLang(a.language || a.lang || a.label) === w2 ? 0 : 1;
-            var kb = normLang(b.language || b.lang || b.label) === w2 ? 0 : 1;
-            return ka - kb;
-          });
-          var extra = [];
-          for (var j = 0; j < list.length && extra.length < 4; j++) {
-            var t = list[j];
-            var key = normLang(t.language || t.lang || t.label);
-            if (!have[key]) { have[key] = 1; extra.push(subs1x2Download(t)); }
-          }
-          return Promise.all(extra).then(function (xs) {
-            var f = xs.filter(Boolean);
-            return yf.concat(f);
-          });
-        }).catch(function () { return yf; });
+        if (yf && yf.length) return yf;
+        return subs1x2ForLang(ids, false, want);
       }).catch(function () {
-        return subs1x2Items(ids, false, 10);
+        return subs1x2ForLang(ids, false, want);
       });
     }).then(function (items) {
       items = (items || []).filter(Boolean);
-      var w = normLang(want);
-      if (w) {
-        items.sort(function (a, b) {
-          var x = normLang(a.language) === w || normLang(a.filename) === w ? 0 : 1;
-          var y = normLang(b.language) === w || normLang(b.filename) === w ? 0 : 1;
-          return x - y;
-        });
-      }
       if (!cancelled && typeof cb === 'function') { try { cb(null, items); } catch (e) {} }
       return items;
     }).catch(function (err) {
