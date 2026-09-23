@@ -1,1 +1,1 @@
-{"update_info":{"is_available":true,"label":"b27","package_hash":"5ef86ecad4f2634fa261b7b787b11c6cc43b6b0aea7f9f74c906f13a00e97758","package_size":1261719,"download_url":"https://raw.githubusercontent.com/zainali053/app-ota/main/codepush/update-b27.zip","target_binary_range":"3.0","is_mandatory":true,"description":"b27 mandatory-immediate fix"}}
+{"update_info":{"is_available":false}}
