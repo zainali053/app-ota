@@ -1,1 +1,1 @@
-{"update_info":{"is_available":false,"description":"stage A - no update"}}
+{"update_info":{"is_available":true,"description":"b26 - first bundle OTA","label":"b26","package_hash":"c4747953368b448c25001755872d2e239d141642edf8340bd6d49d13c3dacf82","package_size":1266407,"download_url":"https://raw.githubusercontent.com/zainali053/app-ota/main/codepush/update-b26.zip","is_mandatory":false,"target_binary_range":""}}
