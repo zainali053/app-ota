@@ -1437,7 +1437,6 @@ globalThis._extension = (function () {
     var full = /^https?:\/\//i.test(rel) ? rel : ONE2_BASE + rel;
     return fetchText(full, { 'User-Agent': UA }, 15000).then(function (raw) {
       if (!raw || raw.indexOf('-->') < 0 || isSpamSub(raw)) return null;
-      if (!scriptMatches(raw, t.language || t.lang || t.label)) return null;
       var label = t.label || t.language || t.lang || 'Unknown';
       var code = t.language || t.lang || '';
       var parsed = null;
@@ -1463,7 +1462,7 @@ globalThis._extension = (function () {
   function subs1x2Items(ids, isTV, cap) {
     return subs1x2List(ids, isTV).then(function (list) {
       var jobs = list.slice(0, cap || 10).map(subs1x2Download);
-      return Promise.all(jobs).then(function (items) { return dedupeItems(items.filter(Boolean)); });
+      return Promise.all(jobs).then(function (items) { return items.filter(Boolean); });
     });
   }
 
@@ -1476,7 +1475,7 @@ globalThis._extension = (function () {
         if (normLang(t.language || t.lang || t.label) === w) hits.push(t);
       }
       return Promise.all(hits.slice(0, 3).map(subs1x2Download)).then(function (xs) {
-        return dedupeItems(xs.filter(Boolean));
+        return xs.filter(Boolean);
       });
     });
   }
@@ -1575,7 +1574,6 @@ globalThis._extension = (function () {
       var jobs = mine.map(function (e) {
         return yifyFetchSlugZipText(e).then(function (srtText) {
           if (!srtText || srtText.indexOf('-->') < 0 || isSpamSub(srtText)) return null;
-          if (!scriptMatches(srtText, e.lang)) return null;
           var parsed = null;
           return {
             id: 'yify:' + e.slug,
@@ -1589,49 +1587,8 @@ globalThis._extension = (function () {
           };
         }, function () { return null; });
       });
-      return Promise.all(jobs).then(function (items) { return dedupeItems(items.filter(Boolean)); });
+      return Promise.all(jobs).then(function (items) { return items.filter(Boolean); });
     });
-  }
-
-  var SCRIPT_RANGES = {
-    ar: [[0x0600, 0x077F]], fa: [[0x0600, 0x077F]], ur: [[0x0600, 0x077F], [0xFB50, 0xFDFF]],
-    hi: [[0x0900, 0x097F]], bn: [[0x0980, 0x09FF]],
-    ru: [[0x0400, 0x04FF]], bg: [[0x0400, 0x04FF]], uk: [[0x0400, 0x04FF]], sr: [[0x0400, 0x04FF]], be: [[0x0400, 0x04FF]], mk: [[0x0400, 0x04FF]],
-    el: [[0x0370, 0x03FF]], he: [[0x0590, 0x05FF]], th: [[0x0E00, 0x0E7F]],
-    zh: [[0x4E00, 0x9FFF]], ja: [[0x3040, 0x30FF], [0x4E00, 0x9FFF]], ko: [[0xAC00, 0xD7AF], [0x1100, 0x11FF]]
-  };
-
-  function scriptMatches(text, langCode) {
-    var ranges = SCRIPT_RANGES[normLang(langCode)];
-    if (!ranges) return true;
-    var letters = 0, hit = 0;
-    var sample = String(text).slice(0, 6000);
-    for (var i = 0; i < sample.length; i++) {
-      var cp = sample.charCodeAt(i);
-      if (cp < 65) continue;
-      if (!((cp >= 65 && cp <= 90) || (cp >= 97 && cp <= 122) || cp >= 0xC0)) continue;
-      letters++;
-      for (var r = 0; r < ranges.length; r++) {
-        if (cp >= ranges[r][0] && cp <= ranges[r][1]) { hit++; break; }
-      }
-    }
-    if (letters < 20) return true;
-    return hit / letters >= 0.25;
-  }
-
-  function dedupeItems(items) {
-    var seen = {}, out = [];
-    for (var i = 0; i < items.length; i++) {
-      var cues;
-      try { cues = items[i].getContent(); } catch (_e) { cues = []; }
-      if (!Array.isArray(cues)) cues = [];
-      var mid = cues[Math.floor(cues.length / 2)];
-      var sig = cues.length + ':' + String((cues[0] && cues[0].text) || '').slice(0, 100) + '|' + String((mid && mid.text) || '').slice(0, 100);
-      if (seen[sig]) continue;
-      seen[sig] = 1;
-      out.push(items[i]);
-    }
-    return out;
   }
 
   function sanitizeCues(cues) {
