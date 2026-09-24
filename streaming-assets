@@ -18,8 +18,8 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
-*   + v29-dedupe: repeat searches return only undelivered items (app
-*     concatenates every response on player remounts)
+*   + v30-lock: each title+language list delivered ONCE per session (app
+*     concatenates re-searches; server top-N shifts between fetches)
 *   + v28-merge: movie list MERGES YIFY + 1x2 (YIFY first, deduped)
 *   + v27-dynlang: language menu shows ALL languages the servers actually
 *     have for the current title (incl. generated entries beyond the
@@ -1752,22 +1752,19 @@ globalThis._extension = (function () {
       });
     }).then(function (items) {
       items = (items || []).filter(Boolean);
-      /* v29-dedupe: the player re-runs this search on remounts and keeps
-         concatenating results. Only hand over items not yet delivered for
-         this title+language this session, so the list can't accumulate
-         duplicate rows. */
+      /* v30-lock: the player re-runs this search on remounts and keeps
+         concatenating results, and the servers' top-N subset shifts between
+         fetches (regional CDN / rating order) - so deliver each
+         title+language list ONCE per session; later calls return nothing.
+         Empty results do NOT lock (retry stays possible). */
       try {
         var dkey = [ids.tmdb_id, ids.season || 0, ids.episode || 0, normLang(want)].join('|');
-        var reg = globalThis._deliveredSubs || (globalThis._deliveredSubs = {});
-        var seen = reg[dkey] || (reg[dkey] = {});
-        var n = 0; for (var _k in seen) { if (Object.prototype.hasOwnProperty.call(seen, _k)) n++; }
-        if (n > 200) reg[dkey] = seen = {};
-        items = items.filter(function (it) {
-          var id = String((it && it.id) || '');
-          if (!id || seen[id]) return false;
-          seen[id] = 1;
-          return true;
-        });
+        var locks = globalThis._subDeliveryLocks || (globalThis._subDeliveryLocks = {});
+        if (locks[dkey]) {
+          items = [];
+        } else if (items.length) {
+          locks[dkey] = 1;
+        }
       } catch (_e) { }
       if (!cancelled && typeof cb === 'function') { try { cb(null, items); } catch (e) { } }
       return items;
