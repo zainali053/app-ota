@@ -18,6 +18,9 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v44-playable: promotes AAC/transcode-family rung whenever the top rung
+*     has a player-silent codec (E-AC3/AC-3/AC-4...) or unknown audio; desc
+*     diag removed.
 *   + v43-diag: audio inspection diagnostics surfaced in NetMirror host desc
 *     (temporary) + inspection retry for cold CDN.
 *   + v42-audio: MP4 header inspection for NetMirror ladders - video-only
@@ -361,6 +364,7 @@ globalThis._extension = (function () {
       });
     });
   }
+  function nmIsTranscodeUrl(u) { return /\/(bt|tran-audio|tran)\//i.test(String(u || '')); }
   function nmFindAacRung(list) {
     if (!list.length) return Promise.resolve(null);
     return nmInspectMp4(list[0].s.url).then(function (info) {
@@ -369,27 +373,38 @@ globalThis._extension = (function () {
     }, function () { return nmFindAacRung(list.slice(1)); });
   }
   function nmDiagSet(txt) {
-    try {
-      globalThis._nmDiag = txt;
-      var h = globalThis._nmHostRef;
-      if (h) h.desc = 'Diag: ' + txt;
-    } catch (_e) { }
+    try { globalThis._nmDiag = txt; } catch (_e) { }
   }
+  function nmPromote(alive, pick) {
+    var out = [pick, alive[0]], i;
+    for (i = 1; i < alive.length; i++) { if (alive[i] !== pick) out.push(alive[i]); }
+    return out;
+  }
+  function nmFirstTranscodeRung(list) {
+    for (var i = 0; i < list.length; i++) { if (nmIsTranscodeUrl(list[i].s.url)) return list[i]; }
+    return null;
+  }
+  /* BAD = codecs the app's player renders silently; known-good = mp4a/opus.
+     Decision: top rung NOAUD -> drop; BAD/unknown codec -> promote an AAC rung
+     (or net27 transcode-family rung, which re-encodes audio to AAC). */
   function nmAudioOrder(alive) {
-    if (alive.length < 2) { nmDiagSet('single-rung'); return Promise.resolve(alive); }
+    if (alive.length < 2) return Promise.resolve(alive);
     var top = alive[0];
     return nmInspectMp4(top.s.url).then(function (info) {
-      try { nmDiagSet('top' + top.s.resolution + '=' + (info.audio === 'unknown' ? 'UNK' : (info.audio === false ? 'NOAUD' : String(info.codec))) + (alive[1] ? ' next' + alive[1].s.resolution : '')); } catch (_e) {}
+      try { nmDiagSet('top' + top.s.resolution + '=' + (info.audio === 'unknown' ? 'UNK' : (info.audio === false ? 'NOAUD' : String(info.codec || 'noc'))) + (alive[1] ? ' next' + alive[1].s.resolution : '')); } catch (_e) {}
       if (info.audio === false) return nmAudioOrder(alive.slice(1));
-      if (info.audio === true && /^(ec-3|ac-3|eac3)$/i.test(String(info.codec || ''))) {
+      var cod = String(info.codec || '').toLowerCase();
+      var bad = /^(ec-3|ac-3|eac3|ac-4|mlpa|truehd)$/.test(cod);
+      var unknown = info.audio === 'unknown';
+      var noCodecInfo = info.audio === true && !cod;
+      if (bad || unknown || noCodecInfo) {
         return nmFindAacRung(alive.slice(1)).then(function (aac) {
-          if (!aac) return alive;
-          var out = [aac, top], i;
-          for (i = 1; i < alive.length; i++) { if (alive[i] !== aac) out.push(alive[i]); }
-          return out;
+          var pick = aac || nmFirstTranscodeRung(alive.slice(1));
+          if (pick) return nmPromote(alive, pick);
+          return alive; /* no provably-playable alternative - keep best */
         });
       }
-      return alive;
+      return alive; /* known-good codec on top - stay */
     }, function () { return alive; });
   }
 
