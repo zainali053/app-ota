@@ -18,6 +18,8 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v39-nmfirst: merge order = NetMirror variants FIRST, then YIFY, then 1x2
+*     (user order: e.g. 4 nm + 3 1x2 English -> English 1-4 nm, 5-7 1x2).
 *   + v38-langnorm: Punjabi (pa/panjabi) + Swahili (sw/swahili) + Hausa/Tamil/
 *     Telugu normalized to single codes - kills duplicate menu rows.
 *   + v37-nmsubs: THIRD subtitle source - net27 captions[] (official
@@ -1754,6 +1756,11 @@ globalThis._extension = (function () {
         return (d && d.captions) || [];
       }, function () { return []; });
     }, function () { return []; });
+    /* only cache SUCCESSES - a net27 blip must not hide captions for 10 min */
+    p = p.then(function (caps) {
+      if (!caps.length) { try { delete reg[ckey]; } catch (_e) { } }
+      return caps;
+    });
     reg[ckey] = { p: p, ts: Date.now() };
     return p;
   }
@@ -1949,21 +1956,21 @@ globalThis._extension = (function () {
     var isTV = (ids.season | 0) > 0 || (ids.episode | 0) > 0;
     var p;
     if (isTV) {
+      /* user order: NetMirror variants FIRST, then 1x2 */
       p = Promise.all([
-        subs1x2ForLang(ids, true, w).then(null, function () { return []; }),
-        nmSubsForLang(ids, true, w).then(null, function () { return []; })
+        nmSubsForLang(ids, true, w).then(null, function () { return []; }),
+        subs1x2ForLang(ids, true, w).then(null, function () { return []; })
       ]).then(function (xs) { return dedupeSubItems(xs[0].concat(xs[1])); });
     } else {
       /* movie: MERGE both servers - YIFY variants first, then 1x2 variants
          (content-deduped). 1x2-only fallback when YIFY has nothing. */
-      p = yifyMovieItems(ids.tmdb_id, w).then(function (yf) {
-        yf = (yf || []).filter(Boolean);
-        return Promise.all([
-          subs1x2ForLang(ids, false, w).then(null, function () { return []; }),
-          nmSubsForLang(ids, false, w).then(null, function () { return []; })
-        ]).then(function (xs) {
-          return dedupeSubItems(yf.concat(xs[0]).concat(xs[1]));
-        });
+      /* user order: NetMirror variants FIRST, then YIFY, then 1x2 */
+      p = Promise.all([
+        nmSubsForLang(ids, false, w).then(null, function () { return []; }),
+        yifyMovieItems(ids.tmdb_id, w).then(null, function () { return []; }),
+        subs1x2ForLang(ids, false, w).then(null, function () { return []; })
+      ]).then(function (xs) {
+        return dedupeSubItems(xs[0].concat(xs[1]).concat(xs[2]));
       }).catch(function () {
         return subs1x2ForLang(ids, false, w).then(null, function () { return []; });
       });
