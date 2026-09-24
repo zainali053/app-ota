@@ -18,8 +18,9 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
-*   + v26-dynlang: language menu shows ONLY languages the servers actually
-*     have for the current title (warmed at playback / on search).
+*   + v27-dynlang: language menu shows ALL languages the servers actually
+*     have for the current title (incl. generated entries beyond the
+*     fixed 14). Warmed at playback / on search.
  * ============================================================ */
 globalThis._extension = (function () {
   'use strict';
@@ -142,11 +143,22 @@ globalThis._extension = (function () {
       var c = globalThis._subLangCache;
       if (c && (Date.now() - c.ts) < SUB_LANG_TTL) {
         if (!c.codes) return LANGS.slice();
-        var out = [];
-        for (var i = 0; i < LANGS.length; i++) {
-          if (c.codes.indexOf(LANGS[i].code) >= 0) out.push(LANGS[i]);
+        var out = [], present = {}, i, l;
+        for (i = 0; i < LANGS.length; i++) {
+          l = LANGS[i];
+          if (c.codes.indexOf(l.code) >= 0) { out.push(l); present[l.code] = 1; }
         }
-        return out; /* may be [] when servers have nothing for this title */
+        /* languages the servers have but the fixed list lacks -> generate */
+        var extra = [];
+        for (i = 0; i < c.codes.length; i++) {
+          var code = c.codes[i];
+          if (!present[code]) extra.push(code);
+        }
+        extra.sort();
+        for (i = 0; i < extra.length; i++) {
+          out.push({ id: 'sublanguageid-' + extra[i], code: extra[i], name: subLangName(extra[i]) });
+        }
+        return out; /* [] when servers have nothing for this title */
       }
     } catch (_e) { }
     return LANGS.slice();
@@ -1076,9 +1088,28 @@ globalThis._extension = (function () {
      We warm a cache of server-available languages for the current title:
        - getHosts() fires at playback start (carries the title detail)
        - searchSubtitle() re-warms with exact ids
-     getSuportLanguages() then returns only languages that actually have
-     subtitles for that title. Unknown/error/never-warmed -> full list. */
+     getSuportLanguages() then returns EVERY language the servers actually
+     have for that title - including languages outside the fixed LANGS list
+     (generated dynamically). Unknown/error/never-warmed -> full LANGS. */
   var SUB_LANG_TTL = 15 * 60 * 1000;
+
+  var CODE_NAMES = {
+    en: 'English', ar: 'Arabic', ur: 'Urdu', hi: 'Hindi', fa: 'Persian',
+    es: 'Spanish', fr: 'French', de: 'German', it: 'Italian', pt: 'Portuguese',
+    ru: 'Russian', uk: 'Ukrainian', tr: 'Turkish', nl: 'Dutch', el: 'Greek',
+    id: 'Indonesian', ms: 'Malay', vi: 'Vietnamese', is: 'Icelandic',
+    ja: 'Japanese', ro: 'Romanian', ko: 'Korean', zh: 'Chinese', bn: 'Bengali',
+    fil: 'Filipino', th: 'Thai', pl: 'Polish', sv: 'Swedish', da: 'Danish',
+    no: 'Norwegian', fi: 'Finnish', cs: 'Czech', sk: 'Slovak', hu: 'Hungarian',
+    he: 'Hebrew', bg: 'Bulgarian', sr: 'Serbian', hr: 'Croatian',
+    panjabi: 'Punjabi', ta: 'Tamil', te: 'Telugu'
+  };
+
+  function subLangName(code) {
+    var c = String(code || '').toLowerCase();
+    if (CODE_NAMES[c]) return CODE_NAMES[c];
+    return c.charAt(0).toUpperCase() + c.slice(1);
+  }
 
   function warmSubLangs(ids) {
     try {
@@ -1564,7 +1595,7 @@ globalThis._extension = (function () {
     german: 'de', de: 'de', japanese: 'ja', ja: 'ja', korean: 'ko', ko: 'ko',
     persian: 'fa', fa: 'fa', vietnamese: 'vi', vi: 'vi', thai: 'th', th: 'th',
     greek: 'el', el: 'el', dutch: 'nl', nl: 'nl', polish: 'pl', pl: 'pl',
-    romanian: 'ro', ro: 'ro', swedish: 'sv', sv: 'sv',
+    romanian: 'ro', ro: 'ro', swedish: 'sv', sv: 'sv', icelandic: 'is', is: 'is', romanian: 'ro', ro: 'ro',
     bulgarian: 'bg', czech: 'cs', cs: 'cs', danish: 'da', da: 'da',
     norwegian: 'no', no: 'no', finnish: 'fi', fi: 'fi', hebrew: 'he', he: 'he',
     hungarian: 'hu', hu: 'hu', ukrainian: 'uk', uk: 'uk', serbian: 'sr',
