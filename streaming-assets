@@ -18,6 +18,8 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v34-preflight: NetMirror primary URL preflighted before the player;
+*     dead/cold first URLs get a fresh re-embed (kills black-first-play)
 *   + v33-langlabels: merges "english 2"-style 1x2 variant labels into the
 *     real language; skips provider-marked failed entries
 *   + v32-prefetch: at playback, ALL languages' subs download to memory
@@ -263,7 +265,30 @@ globalThis._extension = (function () {
     });
   }
 
-  function nmmultiReadHost(kind, tmdbId, season, episode) {
+  /* v34: preflight one stream URL (ranged GET like the player's first
+     chunk). true = usable, false = provably bad, null = unknown. */
+  function nmPreflightCheck(url) {
+    return fetchWithTimeout(url, { headers: { 'User-Agent': UA, 'Referer': 'https://videodownloader.site/', 'Range': 'bytes=0-0' } }, 7000).then(function (res) {
+      try { if (res && res.body && res.body.cancel) res.body.cancel(); } catch (_e) {}
+      var st = (res && res.status) || 0;
+      if (st === 200 || st === 206 || st === 416) return true;
+      if (st >= 400 && st <= 599) return false;
+      return null;
+    }, function () { return null; });
+  }
+
+  /* Verify/refresh the primary dub before the player receives it:
+     preflight OK -> keep; bad/unknown -> re-embed once (fresh signed URLs). */
+  function nmPreflightPrimary(prim, kind, season, episode) {
+    return nmPreflightCheck(prim.res.url).then(function (ok) {
+      if (ok === true) return prim;
+      return nmhiEmbed(prim.d.subjectId, prim.d.detailPath, kind, season, episode).then(function (r2) {
+        return { d: prim.d, res: r2 };
+      }, function () { return prim; });
+    }).catch(function () { return prim; });
+  }
+
+    function nmmultiReadHost(kind, tmdbId, season, episode) {
     if (!tmdbId) return Promise.reject(new Error('nmmulti: no tmdb id'));
     var key = nmCacheKey('nmmulti', kind, String(tmdbId), '', season, episode);
     var hit = nmCacheGet(key);
@@ -295,6 +320,11 @@ globalThis._extension = (function () {
             }
             return w(a) - w(b);
           });
+          return nmPreflightPrimary(outs[0], kind, season, episode).then(function (p2) {
+            outs[0] = p2;
+            return outs;
+          });
+        }).then(function (outs) {
           var rows = outs.map(function (o) {
             var nm = /^default$/i.test(o.d.lang || '') ? 'Original' : String(o.d.lang || 'Audio').replace(/ dub$/i, '');
             var q = o.res.direct_quality;
