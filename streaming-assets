@@ -18,6 +18,9 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v40-nodedupe: cross-source content dedupe REMOVED - all variants from
+*     every source stay visible and numbered (user order: English 1 = nm,
+*     English 2 = 1x2 ...).
 *   + v39-nmfirst: merge order = NetMirror variants FIRST, then YIFY, then 1x2
 *     (user order: e.g. 4 nm + 3 1x2 English -> English 1-4 nm, 5-7 1x2).
 *   + v38-langnorm: Punjabi (pa/panjabi) + Swahili (sw/swahili) + Hausa/Tamil/
@@ -1716,7 +1719,7 @@ globalThis._extension = (function () {
         if (t.status && /fail/i.test(String(t.status))) continue;
         if (normLang(t.language || t.lang || t.label) === w) hits.push(t);
       }
-      return Promise.all(hits.slice(0, 3).map(subs1x2Download)).then(function (xs) {
+      return Promise.all(hits.slice(0, 8).map(subs1x2Download)).then(function (xs) {
         return xs.filter(Boolean);
       });
     });
@@ -1772,7 +1775,7 @@ globalThis._extension = (function () {
       for (i = 0; i < caps.length; i++) {
         if (normLang(nmCapLan(caps[i])) === w) hits.push(caps[i]);
       }
-      return Promise.all(hits.slice(0, 3).map(function (c) {
+      return Promise.all(hits.slice(0, 8).map(function (c) {
         var code = nmCapLan(c);
         return fetchText(c.url, { 'User-Agent': UA }, 15000).then(function (raw) {
           if (!raw || raw.indexOf('-->') < 0 || isSpamSub(raw) || !contentMatchesLang(raw, code)) return null;
@@ -1956,11 +1959,13 @@ globalThis._extension = (function () {
     var isTV = (ids.season | 0) > 0 || (ids.episode | 0) > 0;
     var p;
     if (isTV) {
-      /* user order: NetMirror variants FIRST, then 1x2 */
+      /* user order: NetMirror variants FIRST, then 1x2. NO cross-source
+         dedupe - every source's variants stay visible & numbered (English 1
+         = netmirror, English 2 = 1x2 etc.). */
       p = Promise.all([
         nmSubsForLang(ids, true, w).then(null, function () { return []; }),
         subs1x2ForLang(ids, true, w).then(null, function () { return []; })
-      ]).then(function (xs) { return dedupeSubItems(xs[0].concat(xs[1])); });
+      ]).then(function (xs) { return xs[0].concat(xs[1]); });
     } else {
       /* movie: MERGE both servers - YIFY variants first, then 1x2 variants
          (content-deduped). 1x2-only fallback when YIFY has nothing. */
@@ -1970,7 +1975,7 @@ globalThis._extension = (function () {
         yifyMovieItems(ids.tmdb_id, w).then(null, function () { return []; }),
         subs1x2ForLang(ids, false, w).then(null, function () { return []; })
       ]).then(function (xs) {
-        return dedupeSubItems(xs[0].concat(xs[1]).concat(xs[2]));
+        return xs[0].concat(xs[1]).concat(xs[2]);
       }).catch(function () {
         return subs1x2ForLang(ids, false, w).then(null, function () { return []; });
       });
