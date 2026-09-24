@@ -934,12 +934,14 @@ globalThis._extension = (function () {
   function mpBuildRows(masterUrl, m3u) {
     var lines = m3u.split(/\r?\n/);
     var quals = [{ quality: 'Auto', file: masterUrl }];
+    var autoUrl = masterUrl;
     /* v46: split-audio HLS packaging (separate AUDIO renditions in master)
        means variant playlists are VIDEO-ONLY -> playing them directly = no
        sound (AVPlayer lane). In that case every quality entry plays the
        master (ABR picks best; audio guaranteed). Muxed masters keep
        per-quality variant files as before. */
     var splitAudio = m3u.indexOf('#EXT-X-MEDIA') >= 0 && /TYPE=AUDIO/.test(m3u);
+    if (splitAudio) { autoUrl = masterUrl + '#nmq=auto'; quals[0].file = autoUrl; }
     var seen = {};
     for (var i = 0; i < lines.length; i++) {
       var line = String(lines[i] || '').trim();
@@ -960,7 +962,7 @@ globalThis._extension = (function () {
       if (b.quality === 'Auto') return 1;
       return (parseInt(b.quality, 10) || 0) - (parseInt(a.quality, 10) || 0);
     });
-    return { url: masterUrl, headers: { 'Referer': MP_BASE + '/', 'User-Agent': UA }, quality: 'Auto', direct_quality: quals, vlc: false };
+    return { url: autoUrl, headers: { 'Referer': MP_BASE + '/', 'User-Agent': UA }, quality: 'Auto', direct_quality: quals, vlc: false };
   }
   /* Query one hoster; resolves to its row-set, or null on any miss. */
   function mpQueryHoster(tok, mediaType, tvSlug, tmdbId, source) {
