@@ -18,6 +18,8 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v32-prefetch: at playback, ALL languages' subs download to memory
+*     (3 parallel); selecting any language serves instantly
 *   + v31-utf16-script: UTF-16 BOM decoding (Chinese subs) + script gate
 *     (rejects subs whose content is not the selected language's script)
 *   + v30-lock: each title+language list delivered ONCE per session (app
@@ -1154,6 +1156,7 @@ globalThis._extension = (function () {
         globalThis._subLangBusy = null;
         var codes = Object.keys(langs);
         globalThis._subLangCache = { key: key, ts: Date.now(), codes: codes };
+        if (codes.length) { try { prefetchAllLangs(ids, codes); } catch (_e) { } }
       }).catch(function () { globalThis._subLangBusy = null; });
     } catch (_e) { }
   }
@@ -1758,21 +1761,26 @@ globalThis._extension = (function () {
     });
   }
 
-  /* ---------- entry point (same contract as before) ---------- */
-  function searchSubtitle(ids, langObj, cb) {
-    ids = ids || {};
-    try { warmSubLangs(ids); } catch (_e) { }
-    var cancelled = false;
+  /* ---------- v32: single-flight loader + full prefetch ---------- */
+  /* One loader per title+language (single-flight): whoever asks first runs
+     the download, everyone else (incl. the prefetcher) awaits the same
+     promise. Movie = MERGE YIFY (first) + 1x2; TV = 1x2. Empty results
+     drop out of the registry so a later retry is possible. */
+  function loadSubsForLang(ids, want) {
+    var w = normLang(want);
+    var lkey = [ids.tmdb_id, ids.season || 0, ids.episode || 0, w].join('|');
+    var reg = globalThis._subLoadReg || (globalThis._subLoadReg = {});
+    if (reg[lkey]) return reg[lkey];
     var isTV = (ids.season | 0) > 0 || (ids.episode | 0) > 0;
-    var want = ((langObj && (langObj.code || langObj.name)) || '').toLowerCase();
-    var pr = Promise.resolve().then(function () {
-      if (!ids.tmdb_id) throw new Error('no tmdb id');
-      if (isTV) return subs1x2ForLang(ids, true, want);
+    var p;
+    if (isTV) {
+      p = subs1x2ForLang(ids, true, w);
+    } else {
       /* movie: MERGE both servers - YIFY variants first, then 1x2 variants
          (content-deduped). 1x2-only fallback when YIFY has nothing. */
-      return yifyMovieItems(ids.tmdb_id, want).then(function (yf) {
+      p = yifyMovieItems(ids.tmdb_id, w).then(function (yf) {
         yf = (yf || []).filter(Boolean);
-        return subs1x2ForLang(ids, false, want).then(function (x2) {
+        return subs1x2ForLang(ids, false, w).then(function (x2) {
           x2 = (x2 || []).filter(Boolean);
           if (!x2.length) return yf;
           if (!yf.length) return x2;
@@ -1795,8 +1803,51 @@ globalThis._extension = (function () {
           return out;
         }, function () { return yf; });
       }).catch(function () {
-        return subs1x2ForLang(ids, false, want);
+        return subs1x2ForLang(ids, false, w);
       });
+    }
+    p = Promise.resolve(p).then(function (items) {
+      items = (items || []).filter(Boolean);
+      if (!items.length) { try { delete reg[lkey]; } catch (_e) { } }
+      return items;
+    }).catch(function () {
+      try { delete reg[lkey]; } catch (_e) { }
+      return [];
+    });
+    reg[lkey] = p;
+    return p;
+  }
+
+  /* At playback start: download EVERY available language's subtitles into
+     memory (3 parallel workers). Language selection then serves instantly. */
+  function prefetchAllLangs(ids, codes) {
+    try {
+      var tkey = [ids.tmdb_id, ids.season || 0, ids.episode || 0].join('|');
+      var started = globalThis._subPrefetchStarted || (globalThis._subPrefetchStarted = {});
+      if (started[tkey]) return;
+      started[tkey] = 1;
+      var q = codes.slice(), MAXW = 3;
+      function worker() {
+        var code = q.shift();
+        if (code === undefined) return Promise.resolve();
+        return loadSubsForLang(ids, code).then(worker, worker);
+      }
+      var ws = [];
+      for (var i = 0; i < MAXW && i < q.length; i++) ws.push(worker());
+      Promise.all(ws).catch(function () { });
+    } catch (_e) { }
+  }
+
+    /* ---------- entry point (same contract as before) ---------- */
+  function searchSubtitle(ids, langObj, cb) {
+    ids = ids || {};
+    try { warmSubLangs(ids); } catch (_e) { }
+    var cancelled = false;
+    var isTV = (ids.season | 0) > 0 || (ids.episode | 0) > 0;
+    var want = ((langObj && (langObj.code || langObj.name)) || '').toLowerCase();
+    var pr = Promise.resolve().then(function () {
+      if (!ids.tmdb_id) throw new Error('no tmdb id');
+      return loadSubsForLang(ids, want);
     }).then(function (items) {
       items = (items || []).filter(Boolean);
       /* v30-lock: the player re-runs this search on remounts and keeps
