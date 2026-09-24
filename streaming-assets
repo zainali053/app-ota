@@ -1176,7 +1176,7 @@ globalThis._extension = (function () {
             if (!imdb) return null;
             return fetchText(YIFY_BASE + '/movie-imdb/' + imdb, { 'User-Agent': UA }, 15000).then(function (html) {
               var es = yifyParsePage(html || '');
-              for (var i = 0; i < es.length; i++) mark(es[i].lang);
+              for (var i = 0; i < es.length; i++) { var mk = normLang(es[i].lang); if (mk) langs[mk] = 1; }
             });
           }, function () { return null; }),
           subs1x2List(ids, false).then(function (list) {
