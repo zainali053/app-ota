@@ -18,6 +18,8 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v43-diag: audio inspection diagnostics surfaced in NetMirror host desc
+*     (temporary) + inspection retry for cold CDN.
 *   + v42-audio: MP4 header inspection for NetMirror ladders - video-only
 *     rungs dropped when audio rungs exist; AAC rung preferred over E-AC3 for
 *     Auto (fixes silent English-1080p on Alice etc.).
@@ -331,15 +333,33 @@ globalThis._extension = (function () {
   }
   function nmInspectMp4(url) {
     var HEAD = 3 * 1024 * 1024;
-    return nmFetchRange(url, 'bytes=0-' + (HEAD - 1), 12000).then(function (u8) {
-      var m = nmFindMoov(u8);
-      if (m) return nmParseMoov(u8, m[0], m[1]);
-      return nmFetchRange(url, 'bytes=-' + HEAD, 12000).then(function (t8) {
-        var m2 = nmFindMoov(t8);
-        if (m2 && m2[0] + m2[1] <= t8.length) return nmParseMoov(t8, m2[0], m2[1]);
-        return { audio: 'unknown', codec: null };
-      }, function () { return { audio: 'unknown', codec: null }; });
-    }, function () { return { audio: 'unknown', codec: null }; });
+    function headOnce() {
+      return nmFetchRange(url, 'bytes=0-' + (HEAD - 1), 15000).then(function (u8) {
+        if (!u8 || u8.length < 16) throw new Error('short');
+        var m = nmFindMoov(u8);
+        if (m) return nmParseMoov(u8, m[0], m[1]);
+        return null; /* moov not at head */
+      });
+    }
+    return headOnce().then(function (r) {
+      if (r) return r;
+      if (r === null) {
+        return nmFetchRange(url, 'bytes=-' + HEAD, 15000).then(function (t8) {
+          var m2 = nmFindMoov(t8);
+          if (m2 && m2[0] + m2[1] <= t8.length) return nmParseMoov(t8, m2[0], m2[1]);
+          return { audio: 'unknown', codec: null };
+        }, function () { return { audio: 'unknown', codec: null }; });
+      }
+      return { audio: 'unknown', codec: null };
+    }, function () {
+      /* one retry after a beat (cold CDN) */
+      return new Promise(function (w) { setTimeout(w, 700); }).then(function () {
+        return headOnce().then(function (r) {
+          if (r) return r;
+          return { audio: 'unknown', codec: null };
+        }, function () { return { audio: 'unknown', codec: null }; });
+      });
+    });
   }
   function nmFindAacRung(list) {
     if (!list.length) return Promise.resolve(null);
@@ -348,10 +368,18 @@ globalThis._extension = (function () {
       return nmFindAacRung(list.slice(1));
     }, function () { return nmFindAacRung(list.slice(1)); });
   }
+  function nmDiagSet(txt) {
+    try {
+      globalThis._nmDiag = txt;
+      var h = globalThis._nmHostRef;
+      if (h) h.desc = 'Diag: ' + txt;
+    } catch (_e) { }
+  }
   function nmAudioOrder(alive) {
-    if (alive.length < 2) return Promise.resolve(alive);
+    if (alive.length < 2) { nmDiagSet('single-rung'); return Promise.resolve(alive); }
     var top = alive[0];
     return nmInspectMp4(top.s.url).then(function (info) {
+      try { nmDiagSet('top' + top.s.resolution + '=' + (info.audio === 'unknown' ? 'UNK' : (info.audio === false ? 'NOAUD' : String(info.codec))) + (alive[1] ? ' next' + alive[1].s.resolution : '')); } catch (_e) {}
       if (info.audio === false) return nmAudioOrder(alive.slice(1));
       if (info.audio === true && /^(ec-3|ac-3|eac3)$/i.test(String(info.codec || ''))) {
         return nmFindAacRung(alive.slice(1)).then(function (aac) {
@@ -1394,8 +1422,7 @@ globalThis._extension = (function () {
     var season = args.season, episode = args.episode;
     var tag = kind + '-' + tmdbId + '-' + (season || 0) + '-' + (episode || 0);
 
-    var hosts = [
-      {
+    var nmHost = {
         id: 'nmmulti-' + tag,
         name: 'NetMirror',
         desc: 'Multi-Audio • All Dubs',
@@ -1407,7 +1434,10 @@ globalThis._extension = (function () {
             return nmmultiReadHost(kind, tmdbId, season, episode);
           } catch (e) { return Promise.reject(e); }
         }
-      },
+      };
+    try { globalThis._nmHostRef = nmHost; } catch (_e) {}
+    var hosts = [
+      nmHost,
       {
         id: 'mapple-' + tag,
         name: 'Mapple-4K',
