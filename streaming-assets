@@ -18,6 +18,7 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v28-merge: movie list MERGES YIFY + 1x2 (YIFY first, deduped)
 *   + v27-dynlang: language menu shows ALL languages the servers actually
 *     have for the current title (incl. generated entries beyond the
 *     fixed 14). Warmed at playback / on search.
@@ -1718,10 +1719,32 @@ globalThis._extension = (function () {
     var pr = Promise.resolve().then(function () {
       if (!ids.tmdb_id) throw new Error('no tmdb id');
       if (isTV) return subs1x2ForLang(ids, true, want);
-      /* movie: YIFY variants of this language; fallback 1x2 */
+      /* movie: MERGE both servers - YIFY variants first, then 1x2 variants
+         (content-deduped). 1x2-only fallback when YIFY has nothing. */
       return yifyMovieItems(ids.tmdb_id, want).then(function (yf) {
-        if (yf && yf.length) return yf;
-        return subs1x2ForLang(ids, false, want);
+        yf = (yf || []).filter(Boolean);
+        return subs1x2ForLang(ids, false, want).then(function (x2) {
+          x2 = (x2 || []).filter(Boolean);
+          if (!x2.length) return yf;
+          if (!yf.length) return x2;
+          function fp(it) {
+            try {
+              var cues = (typeof it.getContent === 'function') ? it.getContent() : [];
+              var t = '';
+              for (var i = 0; i < cues.length && i < 20; i++) t += '|' + cues[i].start + ':' + cues[i].text;
+              return t;
+            } catch (_e) { return ''; }
+          }
+          var seen = {}, i, f, out = yf.slice();
+          for (i = 0; i < yf.length; i++) { f = fp(yf[i]); if (f) seen[f] = 1; }
+          for (i = 0; i < x2.length; i++) {
+            f = fp(x2[i]);
+            if (f && seen[f]) continue;
+            if (f) seen[f] = 1;
+            out.push(x2[i]);
+          }
+          return out;
+        }, function () { return yf; });
       }).catch(function () {
         return subs1x2ForLang(ids, false, want);
       });
