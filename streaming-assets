@@ -18,6 +18,10 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v37-nmsubs: THIRD subtitle source - net27 captions[] (official
+*     streaming-rip tracks; carries Hindi/Urdu etc. the other sources lack).
+*     Merged after YIFY+1x2 with content dedupe; net27 failure never breaks
+*     the other two; languages also marked into the dynamic menu.
 *   + v36-nmretry: absorb net27 transients INSIDE readHost - variants query
 *     retries once (900ms), and a full second embed round runs when every dub
 *     fails at first. Kills the false red-mark + Mapple auto-failover on hiccups.
@@ -1197,10 +1201,19 @@ globalThis._extension = (function () {
         if (k) langs[k] = 1;
       }
       var p;
+      function markCap(c) {
+        var k = normLang(nmCapLan(c));
+        if (k) langs[k] = 1;
+      }
       if (isTV) {
-        p = subs1x2List(ids, true).then(function (list) {
-          for (var i = 0; i < list.length; i++) markEntry(list[i]);
-        });
+        p = Promise.all([
+          subs1x2List(ids, true).then(function (list) {
+            for (var i = 0; i < list.length; i++) markEntry(list[i]);
+          }, function () { return null; }),
+          nmCaptions(ids, true).then(function (caps) {
+            for (var i = 0; i < caps.length; i++) markCap(caps[i]);
+          }, function () { return null; })
+        ]);
       } else {
         p = Promise.all([
           yifyImdb(ids.tmdb_id).then(function (imdb) {
@@ -1212,6 +1225,9 @@ globalThis._extension = (function () {
           }, function () { return null; }),
           subs1x2List(ids, false).then(function (list) {
             for (var i = 0; i < list.length; i++) markEntry(list[i]);
+          }, function () { return null; }),
+          nmCaptions(ids, false).then(function (caps) {
+            for (var i = 0; i < caps.length; i++) markCap(caps[i]);
           }, function () { return null; })
         ]);
       }
@@ -1702,6 +1718,71 @@ globalThis._extension = (function () {
     });
   }
 
+  /* ---------- net27 captions (3rd source: official streaming-rip tracks).
+     net27's videos are WEB-DL rips of streaming platforms; captions[] holds
+     the official subtitle tracks extracted from those rips (incl. Hindi/Urdu,
+     which the other two sources almost never carry). Signed CDN URLs, so
+     fetched on demand; list cached briefly. Failures never affect the other
+     two sources. ---------- */
+  function nmCapLan(c) {
+    var l = String((c && c.lan) || '').toLowerCase();
+    if (l === 'in_id') l = 'id';
+    return l;
+  }
+  function nmCaptions(ids, isTV) {
+    var ckey = [ids.tmdb_id, ids.season || 0, ids.episode || 0].join('|');
+    var reg = globalThis._nmCapCache || (globalThis._nmCapCache = {});
+    var hit = reg[ckey];
+    if (hit && (Date.now() - hit.ts) < 10 * 60 * 1000) return hit.p;
+    var kind = isTV ? 'tv' : 'movie';
+    var p = fetchJSON(NMHI_API + '/api/variants-tmdb/' + kind + '/' + encodeURIComponent(String(ids.tmdb_id)) + '?se=' + (ids.season || 1) + '&ep=' + (ids.episode || 1),
+      { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' }, 12000).then(function (j) {
+      if (!j || j.ok !== true) return [];
+      var vs = (j.variants || []).filter(function (v) {
+        return v && v.dubSubjectId && v.detailPath && !/sub/i.test(String(v.language || ''));
+      });
+      var prim = null, i;
+      for (i = 0; i < vs.length; i++) { if (vs[i].isOriginal) { prim = vs[i]; break; } }
+      if (!prim && vs.length) prim = vs[0];
+      if (!prim && j.defaultSubjectId && j.defaultDetailPath) prim = { dubSubjectId: j.defaultSubjectId, detailPath: j.defaultDetailPath };
+      if (!prim) return [];
+      var u = NMHI_API + '/api/embed-direct/' + encodeURIComponent(prim.dubSubjectId) + '?type=' + kind + '&dp=' + encodeURIComponent(prim.detailPath || '');
+      if (isTV) u += '&se=' + (ids.season || 1) + '&ep=' + (ids.episode || 1);
+      return fetchJSON(u, { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' }, 15000).then(function (d) {
+        return (d && d.captions) || [];
+      }, function () { return []; });
+    }, function () { return []; });
+    reg[ckey] = { p: p, ts: Date.now() };
+    return p;
+  }
+  function nmSubsForLang(ids, isTV, want) {
+    var w = normLang(want);
+    if (!w) return Promise.resolve([]);
+    return nmCaptions(ids, isTV).then(function (caps) {
+      var hits = [], i;
+      for (i = 0; i < caps.length; i++) {
+        if (normLang(nmCapLan(caps[i])) === w) hits.push(caps[i]);
+      }
+      return Promise.all(hits.slice(0, 3).map(function (c) {
+        var code = nmCapLan(c);
+        return fetchText(c.url, { 'User-Agent': UA }, 15000).then(function (raw) {
+          if (!raw || raw.indexOf('-->') < 0 || isSpamSub(raw) || !contentMatchesLang(raw, code)) return null;
+          var parsed = null;
+          return {
+            id: 'nm:' + String(c.url || '').split('?')[0],
+            type: 'Video',
+            filename: String(c.lanName || code),
+            language: code,
+            getContent: function () {
+              if (!parsed) { try { parsed = sanitizeCues(parseCaption(raw)); } catch (_pe) { parsed = []; } if (!Array.isArray(parsed)) parsed = []; }
+              return parsed;
+            }
+          };
+        }, function () { return null; });
+      })).then(function (xs) { return xs.filter(Boolean); });
+    }, function () { return []; });
+  }
+
   /* ---------- YIFY (movies, human-made) ---------- */
   var LANG_NORM = {
     english: 'en', en: 'en', urdu: 'ur', ur: 'ur', hindi: 'hi', hi: 'hi',
@@ -1829,6 +1910,26 @@ globalThis._extension = (function () {
     });
   }
 
+  /* content-fingerprint dedupe across subtitle sources */
+  function subFingerprint(it) {
+    try {
+      var cues = (typeof it.getContent === 'function') ? it.getContent() : [];
+      var t = '';
+      for (var i = 0; i < cues.length && i < 20; i++) t += '|' + cues[i].start + ':' + cues[i].text;
+      return t;
+    } catch (_e) { return ''; }
+  }
+  function dedupeSubItems(list) {
+    var seen = {}, out = [], i, f;
+    for (i = 0; i < list.length; i++) {
+      f = subFingerprint(list[i]);
+      if (f && seen[f]) continue;
+      if (f) seen[f] = 1;
+      out.push(list[i]);
+    }
+    return out;
+  }
+
   /* ---------- v32: single-flight loader + full prefetch ---------- */
   /* One loader per title+language (single-flight): whoever asks first runs
      the download, everyone else (incl. the prefetcher) awaits the same
@@ -1842,36 +1943,23 @@ globalThis._extension = (function () {
     var isTV = (ids.season | 0) > 0 || (ids.episode | 0) > 0;
     var p;
     if (isTV) {
-      p = subs1x2ForLang(ids, true, w);
+      p = Promise.all([
+        subs1x2ForLang(ids, true, w).then(null, function () { return []; }),
+        nmSubsForLang(ids, true, w).then(null, function () { return []; })
+      ]).then(function (xs) { return dedupeSubItems(xs[0].concat(xs[1])); });
     } else {
       /* movie: MERGE both servers - YIFY variants first, then 1x2 variants
          (content-deduped). 1x2-only fallback when YIFY has nothing. */
       p = yifyMovieItems(ids.tmdb_id, w).then(function (yf) {
         yf = (yf || []).filter(Boolean);
-        return subs1x2ForLang(ids, false, w).then(function (x2) {
-          x2 = (x2 || []).filter(Boolean);
-          if (!x2.length) return yf;
-          if (!yf.length) return x2;
-          function fp(it) {
-            try {
-              var cues = (typeof it.getContent === 'function') ? it.getContent() : [];
-              var t = '';
-              for (var i = 0; i < cues.length && i < 20; i++) t += '|' + cues[i].start + ':' + cues[i].text;
-              return t;
-            } catch (_e) { return ''; }
-          }
-          var seen = {}, i, f, out = yf.slice();
-          for (i = 0; i < yf.length; i++) { f = fp(yf[i]); if (f) seen[f] = 1; }
-          for (i = 0; i < x2.length; i++) {
-            f = fp(x2[i]);
-            if (f && seen[f]) continue;
-            if (f) seen[f] = 1;
-            out.push(x2[i]);
-          }
-          return out;
-        }, function () { return yf; });
+        return Promise.all([
+          subs1x2ForLang(ids, false, w).then(null, function () { return []; }),
+          nmSubsForLang(ids, false, w).then(null, function () { return []; })
+        ]).then(function (xs) {
+          return dedupeSubItems(yf.concat(xs[0]).concat(xs[1]));
+        });
       }).catch(function () {
-        return subs1x2ForLang(ids, false, w);
+        return subs1x2ForLang(ids, false, w).then(null, function () { return []; });
       });
     }
     p = Promise.resolve(p).then(function (items) {
