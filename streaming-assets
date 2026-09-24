@@ -18,6 +18,8 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v31-utf16-script: UTF-16 BOM decoding (Chinese subs) + script gate
+*     (rejects subs whose content is not the selected language's script)
 *   + v30-lock: each title+language list delivered ONCE per session (app
 *     concatenates re-searches; server top-N shifts between fetches)
 *   + v28-merge: movie list MERGES YIFY + 1x2 (YIFY first, deduped)
@@ -1470,7 +1472,26 @@ globalThis._extension = (function () {
     return scriptScore(a, lo, hi) >= scriptScore(b, lo, hi) ? a : b;
   }
 
+  function utf16BytesToText(u8, le) {
+    var out = [], i = 0, n = u8.length - 1, c, c2;
+    while (i + 1 <= n) {
+      c = le ? (u8[i] | (u8[i + 1] << 8)) : ((u8[i] << 8) | u8[i + 1]);
+      i += 2;
+      if (c >= 0xD800 && c <= 0xDBFF && i + 1 <= n) {
+        c2 = le ? (u8[i] | (u8[i + 1] << 8)) : ((u8[i] << 8) | u8[i + 1]);
+        if (c2 >= 0xDC00 && c2 <= 0xDFFF) { i += 2; out.push(String.fromCharCode(c, c2)); continue; }
+      }
+      out.push(String.fromCharCode(c));
+    }
+    return out.join('');
+  }
+
   function decodeSubBytes(bytes, langHint) {
+    /* UTF-16 with BOM (common for Chinese subs) */
+    if (bytes && bytes.length >= 2) {
+      if (bytes[0] === 0xFF && bytes[1] === 0xFE) return utf16BytesToText(bytes, true);
+      if (bytes[0] === 0xFE && bytes[1] === 0xFF) return utf16BytesToText(bytes, false);
+    }
     if (looksLikeUtf8(bytes)) return bytesToUtf8(bytes);
     var k = normLang(langHint);
     if (k === 'ar' || k === 'fa' || k === 'ur') {
@@ -1491,6 +1512,32 @@ globalThis._extension = (function () {
   function isSpamSub(text) {
     var head = String(text || '').slice(0, 800);
     return /visit\s+[^\s"]*\.(pro|io|cc|me|xyz|tv)\b|sportdb|watch all sports/i.test(head);
+  }
+
+  /* v31: content must actually contain the language's script. Stops
+     mislabeled files (e.g. an ITALIAN sub labeled "Chinese" on YIFY).
+     Latin-script languages are not checked (shared by too many langs). */
+  var SCRIPT_RANGES = {
+    zh: [0x4E00, 0x9FFF], ja: [0x3040, 0x9FFF], ko: [0xAC00, 0xD7AF],
+    ar: [0x0600, 0x077F], ur: [0x0600, 0x077F], fa: [0x0600, 0x077F],
+    hi: [0x0900, 0x097F], bn: [0x0980, 0x09FF], pa: [0x0A00, 0x0A7F],
+    el: [0x0370, 0x03FF], he: [0x0590, 0x05FF], th: [0x0E00, 0x0E7F],
+    ru: [0x0400, 0x04FF], uk: [0x0400, 0x04FF], bg: [0x0400, 0x04FF],
+    sr: [0x0400, 0x04FF], mk: [0x0400, 0x04FF], be: [0x0400, 0x04FF]
+  };
+  function contentMatchesLang(text, langHint) {
+    try {
+      var k = normLang(langHint);
+      var r = SCRIPT_RANGES[k];
+      if (!r) return true;
+      var sample = String(text || '').slice(0, 6000);
+      var hits = 0, c;
+      for (var i = 0; i < sample.length; i++) {
+        c = sample.charCodeAt(i);
+        if (c >= r[0] && c <= r[1]) hits++;
+      }
+      return hits >= 8;
+    } catch (_e) { return true; }
   }
   function zipExtractBytes(u8) {
     var i = 0, n = u8.length;
@@ -1544,7 +1591,7 @@ globalThis._extension = (function () {
     if (!rel) return Promise.resolve(null);
     var full = /^https?:\/\//i.test(rel) ? rel : ONE2_BASE + rel;
     return fetchText(full, { 'User-Agent': UA }, 15000).then(function (raw) {
-      if (!raw || raw.indexOf('-->') < 0 || isSpamSub(raw)) return null;
+      if (!raw || raw.indexOf('-->') < 0 || isSpamSub(raw) || !contentMatchesLang(raw, code)) return null;
       var label = t.label || t.language || t.lang || 'Unknown';
       var code = t.language || t.lang || '';
       var parsed = null;
@@ -1681,7 +1728,7 @@ globalThis._extension = (function () {
       mine = mine.slice(0, 8);
       var jobs = mine.map(function (e) {
         return yifyFetchSlugZipText(e).then(function (srtText) {
-          if (!srtText || srtText.indexOf('-->') < 0 || isSpamSub(srtText)) return null;
+          if (!srtText || srtText.indexOf('-->') < 0 || isSpamSub(srtText) || !contentMatchesLang(srtText, e.lang)) return null;
           var parsed = null;
           return {
             id: 'yify:' + e.slug,
