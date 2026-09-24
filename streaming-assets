@@ -18,6 +18,8 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v33-langlabels: merges "english 2"-style 1x2 variant labels into the
+*     real language; skips provider-marked failed entries
 *   + v32-prefetch: at playback, ALL languages' subs download to memory
 *     (3 parallel); selecting any language serves instantly
 *   + v31-utf16-script: UTF-16 BOM decoding (Chinese subs) + script gate
@@ -1128,13 +1130,15 @@ globalThis._extension = (function () {
       globalThis._subLangBusy = key;
       var isTV = (ids.season | 0) > 0 || (ids.episode | 0) > 0;
       var langs = {};
-      function mark(x) { var k = normLang(x); if (k) langs[k] = 1; }
+      function markEntry(t) {
+        if (t && t.status && /fail/i.test(String(t.status))) return;
+        var k = normLang(t.language || t.lang || t.label);
+        if (k) langs[k] = 1;
+      }
       var p;
       if (isTV) {
         p = subs1x2List(ids, true).then(function (list) {
-          for (var i = 0; i < list.length; i++) {
-            var t = list[i]; mark(t.language || t.lang || t.label);
-          }
+          for (var i = 0; i < list.length; i++) markEntry(list[i]);
         });
       } else {
         p = Promise.all([
@@ -1146,9 +1150,7 @@ globalThis._extension = (function () {
             });
           }, function () { return null; }),
           subs1x2List(ids, false).then(function (list) {
-            for (var i = 0; i < list.length; i++) {
-              var t = list[i]; mark(t.language || t.lang || t.label);
-            }
+            for (var i = 0; i < list.length; i++) markEntry(list[i]);
           }, function () { return null; })
         ]);
       }
@@ -1630,6 +1632,7 @@ globalThis._extension = (function () {
       var hits = [];
       for (var i = 0; i < list.length; i++) {
         var t = list[i];
+        if (t.status && /fail/i.test(String(t.status))) continue;
         if (normLang(t.language || t.lang || t.label) === w) hits.push(t);
       }
       return Promise.all(hits.slice(0, 3).map(subs1x2Download)).then(function (xs) {
@@ -1655,8 +1658,12 @@ globalThis._extension = (function () {
     croatian: 'hr', hr: 'hr', slovak: 'sk', sk: 'sk',
     'brazilian portuguese': 'pt', 'portuguese (brazilian)': 'pt'
   };
+  function cleanLangLabel(x) {
+    /* 1x2 labels duplicate variants as "english 2", "french 2" ... */
+    return String(x || '').replace(/\s+\d+\s*$/, '').trim();
+  }
   function normLang(x) {
-    var k = String(x || '').toLowerCase().trim();
+    var k = cleanLangLabel(x).toLowerCase();
     return LANG_NORM[k] || k;
   }
 
