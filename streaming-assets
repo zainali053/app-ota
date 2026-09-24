@@ -18,6 +18,8 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v38-langnorm: Punjabi (pa/panjabi) + Swahili (sw/swahili) + Hausa/Tamil/
+*     Telugu normalized to single codes - kills duplicate menu rows.
 *   + v37-nmsubs: THIRD subtitle source - net27 captions[] (official
 *     streaming-rip tracks; carries Hindi/Urdu etc. the other sources lack).
 *     Merged after YIFY+1x2 with content dedupe; net27 failure never breaks
@@ -1176,7 +1178,7 @@ globalThis._extension = (function () {
     fil: 'Filipino', th: 'Thai', pl: 'Polish', sv: 'Swedish', da: 'Danish',
     no: 'Norwegian', fi: 'Finnish', cs: 'Czech', sk: 'Slovak', hu: 'Hungarian',
     he: 'Hebrew', bg: 'Bulgarian', sr: 'Serbian', hr: 'Croatian',
-    panjabi: 'Punjabi', ta: 'Tamil', te: 'Telugu'
+    pa: 'Punjabi', panjabi: 'Punjabi', ta: 'Tamil', te: 'Telugu', sw: 'Swahili', ha: 'Hausa'
   };
 
   function subLangName(code) {
@@ -1798,7 +1800,11 @@ globalThis._extension = (function () {
     norwegian: 'no', no: 'no', finnish: 'fi', fi: 'fi', hebrew: 'he', he: 'he',
     hungarian: 'hu', hu: 'hu', ukrainian: 'uk', uk: 'uk', serbian: 'sr',
     croatian: 'hr', hr: 'hr', slovak: 'sk', sk: 'sk',
-    'brazilian portuguese': 'pt', 'portuguese (brazilian)': 'pt'
+    'brazilian portuguese': 'pt', 'portuguese (brazilian)': 'pt',
+    punjabi: 'pa', panjabi: 'pa', pa: 'pa', 'ਪੰਜਾਬੀ': 'pa',
+    swahili: 'sw', sw: 'sw', kiswahili: 'sw',
+    hausa: 'ha', ha: 'ha',
+    tamil: 'ta', ta: 'ta', telugu: 'te', te: 'te'
   };
   function cleanLangLabel(x) {
     /* 1x2 labels duplicate variants as "english 2", "french 2" ... */
