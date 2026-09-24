@@ -18,28 +18,6 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
-*   + v44-playable: promotes AAC/transcode-family rung whenever the top rung
-*     has a player-silent codec (E-AC3/AC-3/AC-4...) or unknown audio; desc
-*     diag removed.
-*   + v43-diag: audio inspection diagnostics surfaced in NetMirror host desc
-*     (temporary) + inspection retry for cold CDN.
-*   + v42-audio: MP4 header inspection for NetMirror ladders - video-only
-*     rungs dropped when audio rungs exist; AAC rung preferred over E-AC3 for
-*     Auto (fixes silent English-1080p on Alice etc.).
-*   + v41-sync: captions now come from the SAME variant the engine plays
-*     (Hindi-first); master-only languages carried over with offset computed
-*     from a common language's first cue (fixes 5s desync on dubs).
-*   + v40-nodedupe: cross-source content dedupe REMOVED - all variants from
-*     every source stay visible and numbered (user order: English 1 = nm,
-*     English 2 = 1x2 ...).
-*   + v39-nmfirst: merge order = NetMirror variants FIRST, then YIFY, then 1x2
-*     (user order: e.g. 4 nm + 3 1x2 English -> English 1-4 nm, 5-7 1x2).
-*   + v38-langnorm: Punjabi (pa/panjabi) + Swahili (sw/swahili) + Hausa/Tamil/
-*     Telugu normalized to single codes - kills duplicate menu rows.
-*   + v37-nmsubs: THIRD subtitle source - net27 captions[] (official
-*     streaming-rip tracks; carries Hindi/Urdu etc. the other sources lack).
-*     Merged after YIFY+1x2 with content dedupe; net27 failure never breaks
-*     the other two; languages also marked into the dynamic menu.
 *   + v36-nmretry: absorb net27 transients INSIDE readHost - variants query
 *     retries once (900ms), and a full second embed round runs when every dub
 *     fails at first. Kills the false red-mark + Mapple auto-failover on hiccups.
@@ -254,134 +232,6 @@ globalThis._extension = (function () {
       return 'unknown';
     }, function () { return 'unknown'; });
   }
-  /* v42: some net27 rungs are video-only transcodes or carry E-AC3 audio the
-     player renders silently. Inspect MP4 headers (ranged fetch) and order the
-     ladder so Auto picks a rung that actually produces sound. */
-  function nmFetchRange(url, rangeHdr, timeoutMs) {
-    return new Promise(function (resolve, reject) {
-      var done = false;
-      var to = setTimeout(function () { if (!done) { done = true; reject(new Error('range timeout')); } }, timeoutMs || 12000);
-      Promise.resolve().then(function () {
-        return fetch(url, { headers: { 'User-Agent': UA, 'Referer': 'https://videodownloader.site/', 'Range': rangeHdr } });
-      }).then(function (res) {
-        if (!(res.status === 206 || res.status === 200)) throw new Error('http ' + res.status);
-        if (typeof res.arrayBuffer === 'function') return res.arrayBuffer();
-        throw new Error('no arrayBuffer');
-      }).then(function (buf) {
-        if (done) return; clearTimeout(to); done = true;
-        resolve(new Uint8Array(buf));
-      }).catch(function (e) {
-        if (!done) { clearTimeout(to); done = true; reject(e); }
-      });
-    });
-  }
-  function nmReadU32(u8, off) { return ((u8[off] << 24) | (u8[off + 1] << 16) | (u8[off + 2] << 8) | u8[off + 3]) >>> 0; }
-  function nmBoxType(u8, off) { return String.fromCharCode(u8[off], u8[off + 1], u8[off + 2], u8[off + 3]); }
-  function nmEachBox(u8, start, end, cb) {
-    var off = start;
-    while (off + 8 <= end) {
-      var size = nmReadU32(u8, off);
-      var type = nmBoxType(u8, off + 4);
-      if (size === 1) break; /* largesize - bail safely */
-      if (size === 0) size = end - off;
-      if (size < 8) break;
-      if (cb(off, size, type)) return true;
-      off += size;
-    }
-    return false;
-  }
-  function nmFindMoov(u8) {
-    var found = null;
-    nmEachBox(u8, 0, u8.length, function (off, size, type) {
-      if (type === 'moov') { found = [off, size]; return true; }
-      return false;
-    });
-    return found;
-  }
-  function nmParseMoov(u8, moff, msize) {
-    var out = { audio: false, codec: null };
-    var mend = Math.min(moff + msize, u8.length);
-    nmEachBox(u8, moff + 8, mend, function (toff, tsize, ttype) {
-      if (ttype !== 'trak') return false;
-      var tend = Math.min(toff + tsize, u8.length);
-      var handler = null, codec = null;
-      nmEachBox(u8, toff + 8, tend, function (moff2, msize2, mtype) {
-        if (mtype !== 'mdia') return false;
-        var mend2 = Math.min(moff2 + msize2, u8.length);
-        nmEachBox(u8, moff2 + 8, mend2, function (xoff, xsize, xtype) {
-          if (xtype === 'hdlr' && xoff + 20 <= u8.length) {
-            handler = nmBoxType(u8, xoff + 16);
-          } else if (xtype === 'minf') {
-            var xend = Math.min(xoff + xsize, u8.length);
-            nmEachBox(u8, xoff + 8, xend, function (soff, ssize, stype) {
-              if (stype !== 'stbl') return false;
-              var send = Math.min(soff + ssize, u8.length);
-              nmEachBox(u8, soff + 8, send, function (qoff, qsize, qtype) {
-                if (qtype !== 'stsd') return false;
-                var e = qoff + 16; /* hdr + verflags + entry_count */
-                if (e + 8 <= u8.length) codec = nmBoxType(u8, e + 4);
-                return true;
-              });
-              return false;
-            });
-          }
-          return false;
-        });
-        return true;
-      });
-      if (handler === 'soun') { out.audio = true; if (!out.codec) out.codec = codec; }
-      return false;
-    });
-    return out;
-  }
-  function nmInspectMp4(url) {
-    var HEAD = 3 * 1024 * 1024;
-    function headOnce() {
-      return nmFetchRange(url, 'bytes=0-' + (HEAD - 1), 15000).then(function (u8) {
-        if (!u8 || u8.length < 16) throw new Error('short');
-        var m = nmFindMoov(u8);
-        if (m) return nmParseMoov(u8, m[0], m[1]);
-        return null; /* moov not at head */
-      });
-    }
-    return headOnce().then(function (r) {
-      if (r) return r;
-      if (r === null) {
-        return nmFetchRange(url, 'bytes=-' + HEAD, 15000).then(function (t8) {
-          var m2 = nmFindMoov(t8);
-          if (m2 && m2[0] + m2[1] <= t8.length) return nmParseMoov(t8, m2[0], m2[1]);
-          return { audio: 'unknown', codec: null };
-        }, function () { return { audio: 'unknown', codec: null }; });
-      }
-      return { audio: 'unknown', codec: null };
-    }, function () {
-      /* one retry after a beat (cold CDN) */
-      return new Promise(function (w) { setTimeout(w, 700); }).then(function () {
-        return headOnce().then(function (r) {
-          if (r) return r;
-          return { audio: 'unknown', codec: null };
-        }, function () { return { audio: 'unknown', codec: null }; });
-      });
-    });
-  }
-  function nmDiagSet(txt) {
-    try { globalThis._nmDiag = txt; } catch (_e) { }
-  }
-  /* BAD = codecs the app's player renders silently; known-good = mp4a/opus.
-     Decision: top rung NOAUD -> drop; BAD/unknown codec -> promote an AAC rung
-     (or net27 transcode-family rung, which re-encodes audio to AAC). */
-  function nmAudioOrder(alive) {
-    /* v45: NO auto-downgrade. Engine never shifts quality on its own -
-       user picks server/quality. Only provably audio-less top rungs drop. */
-    if (alive.length < 2) return Promise.resolve(alive);
-    var top = alive[0];
-    return nmInspectMp4(top.s.url).then(function (info) {
-      try { nmDiagSet('top' + top.s.resolution + '=' + (info.audio === 'unknown' ? 'UNK' : (info.audio === false ? 'NOAUD' : String(info.codec || 'noc'))) + (alive[1] ? ' next' + alive[1].s.resolution : '')); } catch (_e) {}
-      if (info.audio === false) return nmAudioOrder(alive.slice(1));
-      return alive;
-    }, function () { return alive; });
-  }
-
   function nmhiEmbed(sid, dp, kind, season, episode) {
     var u = NMHI_API + '/api/embed-direct/' + encodeURIComponent(sid) + '?type=' + kind + '&dp=' + encodeURIComponent(dp || '');
     if (kind === 'tv') u += '&se=' + (season || 1) + '&ep=' + (episode || 1);
@@ -397,9 +247,6 @@ globalThis._extension = (function () {
       });
       return Promise.all(probes).then(function (res2) {
         var alive = res2.filter(function (x) { return x.st !== 'dead'; });
-        if (!alive.length) throw new Error('nmhi: streams dead');
-        return nmAudioOrder(alive);
-      }).then(function (alive) {
         if (!alive.length) throw new Error('nmhi: streams dead');
         var best = alive[0].s.url;
         var dq = [{ quality: 'Auto', file: best }];
@@ -934,12 +781,6 @@ globalThis._extension = (function () {
   function mpBuildRows(masterUrl, m3u) {
     var lines = m3u.split(/\r?\n/);
     var quals = [{ quality: 'Auto', file: masterUrl }];
-    /* v46: split-audio HLS packaging (separate AUDIO renditions in master)
-       means variant playlists are VIDEO-ONLY -> playing them directly = no
-       sound (AVPlayer lane). In that case every quality entry plays the
-       master (ABR picks best; audio guaranteed). Muxed masters keep
-       per-quality variant files as before. */
-    var splitAudio = m3u.indexOf('#EXT-X-MEDIA') >= 0 && /TYPE=AUDIO/.test(m3u);
     var seen = {};
     for (var i = 0; i < lines.length; i++) {
       var line = String(lines[i] || '').trim();
@@ -947,7 +788,7 @@ globalThis._extension = (function () {
       var m = line.match(/RESOLUTION=\d+x(\d+)/);
       var next = String(lines[i + 1] || '').trim();
       if (!m || !next || next.charAt(0) === '#') continue;
-      var file = splitAudio ? masterUrl : (/^https?:\/\//i.test(next) ? next : vxResolveSeg(masterUrl, next));
+      var file = /^https?:\/\//i.test(next) ? next : vxResolveSeg(masterUrl, next);
       if (!file) continue;
       var label = m[1] + 'p';
       if (seen[label]) continue;
@@ -1331,7 +1172,7 @@ globalThis._extension = (function () {
     fil: 'Filipino', th: 'Thai', pl: 'Polish', sv: 'Swedish', da: 'Danish',
     no: 'Norwegian', fi: 'Finnish', cs: 'Czech', sk: 'Slovak', hu: 'Hungarian',
     he: 'Hebrew', bg: 'Bulgarian', sr: 'Serbian', hr: 'Croatian',
-    pa: 'Punjabi', panjabi: 'Punjabi', ta: 'Tamil', te: 'Telugu', sw: 'Swahili', ha: 'Hausa'
+    panjabi: 'Punjabi', ta: 'Tamil', te: 'Telugu'
   };
 
   function subLangName(code) {
@@ -1356,19 +1197,10 @@ globalThis._extension = (function () {
         if (k) langs[k] = 1;
       }
       var p;
-      function markCap(c) {
-        var k = normLang(nmCapLan(c));
-        if (k) langs[k] = 1;
-      }
       if (isTV) {
-        p = Promise.all([
-          subs1x2List(ids, true).then(function (list) {
-            for (var i = 0; i < list.length; i++) markEntry(list[i]);
-          }, function () { return null; }),
-          nmCaptions(ids, true).then(function (caps) {
-            for (var i = 0; i < caps.length; i++) markCap(caps[i]);
-          }, function () { return null; })
-        ]);
+        p = subs1x2List(ids, true).then(function (list) {
+          for (var i = 0; i < list.length; i++) markEntry(list[i]);
+        });
       } else {
         p = Promise.all([
           yifyImdb(ids.tmdb_id).then(function (imdb) {
@@ -1380,9 +1212,6 @@ globalThis._extension = (function () {
           }, function () { return null; }),
           subs1x2List(ids, false).then(function (list) {
             for (var i = 0; i < list.length; i++) markEntry(list[i]);
-          }, function () { return null; }),
-          nmCaptions(ids, false).then(function (caps) {
-            for (var i = 0; i < caps.length; i++) markCap(caps[i]);
           }, function () { return null; })
         ]);
       }
@@ -1417,7 +1246,8 @@ globalThis._extension = (function () {
     var season = args.season, episode = args.episode;
     var tag = kind + '-' + tmdbId + '-' + (season || 0) + '-' + (episode || 0);
 
-    var nmHost = {
+    var hosts = [
+      {
         id: 'nmmulti-' + tag,
         name: 'NetMirror',
         desc: 'Multi-Audio • All Dubs',
@@ -1429,10 +1259,7 @@ globalThis._extension = (function () {
             return nmmultiReadHost(kind, tmdbId, season, episode);
           } catch (e) { return Promise.reject(e); }
         }
-      };
-    try { globalThis._nmHostRef = nmHost; } catch (_e) {}
-    var hosts = [
-      nmHost,
+      },
       {
         id: 'mapple-' + tag,
         name: 'Mapple-4K',
@@ -1869,146 +1696,10 @@ globalThis._extension = (function () {
         if (t.status && /fail/i.test(String(t.status))) continue;
         if (normLang(t.language || t.lang || t.label) === w) hits.push(t);
       }
-      return Promise.all(hits.slice(0, 8).map(subs1x2Download)).then(function (xs) {
+      return Promise.all(hits.slice(0, 3).map(subs1x2Download)).then(function (xs) {
         return xs.filter(Boolean);
       });
     });
-  }
-
-  /* ---------- net27 captions (3rd source: official streaming-rip tracks).
-     net27's videos are WEB-DL rips of streaming platforms; captions[] holds
-     the official subtitle tracks extracted from those rips (incl. Hindi/Urdu,
-     which the other two sources almost never carry). Signed CDN URLs, so
-     fetched on demand; list cached briefly. Failures never affect the other
-     two sources. ---------- */
-  function nmCapLan(c) {
-    var l = String((c && c.lan) || '').toLowerCase();
-    if (l === 'in_id') l = 'id';
-    return l;
-  }
-  /* v41: SYNC FIX. Captions are timed per video file. The engine plays the
-     Hindi-first variant, so captions MUST come from that same variant. Extra
-     languages that only exist on the master/Default variant are carried over
-     with an offset computed from a common language's first cue. */
-  function nmEmbedURL(v, kind, ids) {
-    var u = NMHI_API + '/api/embed-direct/' + encodeURIComponent(v.dubSubjectId) + '?type=' + kind + '&dp=' + encodeURIComponent(v.detailPath || '');
-    if (kind === 'tv') u += '&se=' + (ids.season || 1) + '&ep=' + (ids.episode || 1);
-    return u;
-  }
-  function nmFirstCueStart(url) {
-    return fetchText(url, { 'User-Agent': UA }, 15000).then(function (raw) {
-      if (!raw) return null;
-      var cues = [];
-      try { cues = parseCaption(raw); } catch (_e) { cues = []; }
-      return (cues && cues.length && typeof cues[0].start === 'number') ? cues[0].start : null;
-    }, function () { return null; });
-  }
-  function nmCaptions(ids, isTV) {
-    var ckey = [ids.tmdb_id, ids.season || 0, ids.episode || 0].join('|');
-    var reg = globalThis._nmCapCache || (globalThis._nmCapCache = {});
-    var hit = reg[ckey];
-    if (hit && (Date.now() - hit.ts) < 10 * 60 * 1000) return hit.p;
-    var kind = isTV ? 'tv' : 'movie';
-    var NH = { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' };
-    var p = fetchJSON(NMHI_API + '/api/variants-tmdb/' + kind + '/' + encodeURIComponent(String(ids.tmdb_id)) + '?se=' + (ids.season || 1) + '&ep=' + (ids.episode || 1),
-      NH, 12000).then(function (j) {
-      if (!j || j.ok !== true) return [];
-      var vs = (j.variants || []).filter(function (v) {
-        return v && v.dubSubjectId && v.detailPath && !/sub/i.test(String(v.language || ''));
-      });
-      /* SAME pick as nmmultiReadHost's sort: Hindi > isOriginal > first */
-      var P = null, i;
-      for (i = 0; i < vs.length; i++) { if (/hindi/i.test(String(vs[i].language || ''))) { P = vs[i]; break; } }
-      if (!P) { for (i = 0; i < vs.length; i++) { if (vs[i].isOriginal) { P = vs[i]; break; } } }
-      if (!P && vs.length) P = vs[0];
-      if (!P && j.defaultSubjectId && j.defaultDetailPath) P = { dubSubjectId: j.defaultSubjectId, detailPath: j.defaultDetailPath };
-      if (!P) return [];
-      return fetchJSON(nmEmbedURL(P, kind, ids), NH, 15000).then(function (d) {
-        var capsP = (d && d.captions) || [];
-        /* master fallback variant: "Default" lang, else first != P */
-        var F = null;
-        for (i = 0; i < vs.length; i++) {
-          if (vs[i].dubSubjectId !== P.dubSubjectId && /^default$/i.test(String(vs[i].language || ''))) { F = vs[i]; break; }
-        }
-        if (!F) { for (i = 0; i < vs.length; i++) { if (vs[i].dubSubjectId !== P.dubSubjectId) { F = vs[i]; break; } } }
-        if (!F) return capsP;
-        return fetchJSON(nmEmbedURL(F, kind, ids), NH, 15000).then(function (dF) {
-          var capsF = (dF && dF.captions) || [];
-          if (!capsP.length) return capsF;
-          if (!capsF.length) return capsP;
-          var haveP = {}, k;
-          for (i = 0; i < capsP.length; i++) haveP[nmCapLan(capsP[i])] = 1;
-          var extra = [];
-          for (i = 0; i < capsF.length; i++) { if (!haveP[nmCapLan(capsF[i])]) extra.push(capsF[i]); }
-          if (!extra.length) return capsP;
-          /* offset via a common language (prefer en): played-start - master-start */
-          var comP = null, comF = null, wantL = ['en'], li;
-          function findCommon(langList) {
-            for (li = 0; li < langList.length; li++) {
-              var a = null, b = null, q;
-              for (q = 0; q < capsP.length; q++) { if (nmCapLan(capsP[q]) === langList[li]) { a = capsP[q]; break; } }
-              if (!a) continue;
-              for (q = 0; q < capsF.length; q++) { if (nmCapLan(capsF[q]) === langList[li]) { b = capsF[q]; break; } }
-              if (b) return [a, b];
-            }
-            return null;
-          }
-          var otherLangs = [];
-          for (i = 0; i < capsP.length; i++) { var kl = nmCapLan(capsP[i]); if (kl !== 'en' && otherLangs.indexOf(kl) < 0) otherLangs.push(kl); }
-          var pair = findCommon(wantL) || findCommon(otherLangs);
-          if (!pair) { for (i = 0; i < extra.length; i++) extra[i].__off = 0; return capsP.concat(extra); }
-          return Promise.all([nmFirstCueStart(pair[0].url), nmFirstCueStart(pair[1].url)]).then(function (st) {
-            var off = (st[0] != null && st[1] != null) ? (st[0] - st[1]) : 0;
-            if (Math.abs(off) > 300000) off = 0; /* sanity: ignore > 5min */
-            for (i = 0; i < extra.length; i++) extra[i].__off = off;
-            return capsP.concat(extra);
-          });
-        }, function () { return capsP; });
-      }, function () { return []; });
-    }, function () { return []; });
-    /* only cache SUCCESSES - a net27 blip must not hide captions for 10 min */
-    p = p.then(function (caps) {
-      if (!caps.length) { try { delete reg[ckey]; } catch (_e) { } }
-      return caps;
-    });
-    reg[ckey] = { p: p, ts: Date.now() };
-    return p;
-  }
-  function nmSubsForLang(ids, isTV, want) {
-    var w = normLang(want);
-    if (!w) return Promise.resolve([]);
-    return nmCaptions(ids, isTV).then(function (caps) {
-      var hits = [], i;
-      for (i = 0; i < caps.length; i++) {
-        if (normLang(nmCapLan(caps[i])) === w) hits.push(caps[i]);
-      }
-      return Promise.all(hits.slice(0, 8).map(function (c) {
-        var code = nmCapLan(c);
-        var off = (c && c.__off) | 0;
-        return fetchText(c.url, { 'User-Agent': UA }, 15000).then(function (raw) {
-          if (!raw || raw.indexOf('-->') < 0 || isSpamSub(raw) || !contentMatchesLang(raw, code)) return null;
-          var parsed = null;
-          return {
-            id: 'nm:' + String(c.url || '').split('?')[0] + (off ? ':off' + off : ''),
-            type: 'Video',
-            filename: String(c.lanName || code),
-            language: code,
-            getContent: function () {
-              if (!parsed) {
-                try { parsed = sanitizeCues(parseCaption(raw)); } catch (_pe) { parsed = []; }
-                if (!Array.isArray(parsed)) parsed = [];
-                if (off) {
-                  for (var qi = 0; qi < parsed.length; qi++) {
-                    parsed[qi] = { start: parsed[qi].start + off, end: parsed[qi].end + off, text: parsed[qi].text };
-                  }
-                }
-              }
-              return parsed;
-            }
-          };
-        }, function () { return null; });
-      })).then(function (xs) { return xs.filter(Boolean); });
-    }, function () { return []; });
   }
 
   /* ---------- YIFY (movies, human-made) ---------- */
@@ -2026,11 +1717,7 @@ globalThis._extension = (function () {
     norwegian: 'no', no: 'no', finnish: 'fi', fi: 'fi', hebrew: 'he', he: 'he',
     hungarian: 'hu', hu: 'hu', ukrainian: 'uk', uk: 'uk', serbian: 'sr',
     croatian: 'hr', hr: 'hr', slovak: 'sk', sk: 'sk',
-    'brazilian portuguese': 'pt', 'portuguese (brazilian)': 'pt',
-    punjabi: 'pa', panjabi: 'pa', pa: 'pa', 'ਪੰਜਾਬੀ': 'pa',
-    swahili: 'sw', sw: 'sw', kiswahili: 'sw',
-    hausa: 'ha', ha: 'ha',
-    tamil: 'ta', ta: 'ta', telugu: 'te', te: 'te'
+    'brazilian portuguese': 'pt', 'portuguese (brazilian)': 'pt'
   };
   function cleanLangLabel(x) {
     /* 1x2 labels duplicate variants as "english 2", "french 2" ... */
@@ -2142,26 +1829,6 @@ globalThis._extension = (function () {
     });
   }
 
-  /* content-fingerprint dedupe across subtitle sources */
-  function subFingerprint(it) {
-    try {
-      var cues = (typeof it.getContent === 'function') ? it.getContent() : [];
-      var t = '';
-      for (var i = 0; i < cues.length && i < 20; i++) t += '|' + cues[i].start + ':' + cues[i].text;
-      return t;
-    } catch (_e) { return ''; }
-  }
-  function dedupeSubItems(list) {
-    var seen = {}, out = [], i, f;
-    for (i = 0; i < list.length; i++) {
-      f = subFingerprint(list[i]);
-      if (f && seen[f]) continue;
-      if (f) seen[f] = 1;
-      out.push(list[i]);
-    }
-    return out;
-  }
-
   /* ---------- v32: single-flight loader + full prefetch ---------- */
   /* One loader per title+language (single-flight): whoever asks first runs
      the download, everyone else (incl. the prefetcher) awaits the same
@@ -2175,25 +1842,36 @@ globalThis._extension = (function () {
     var isTV = (ids.season | 0) > 0 || (ids.episode | 0) > 0;
     var p;
     if (isTV) {
-      /* user order: NetMirror variants FIRST, then 1x2. NO cross-source
-         dedupe - every source's variants stay visible & numbered (English 1
-         = netmirror, English 2 = 1x2 etc.). */
-      p = Promise.all([
-        nmSubsForLang(ids, true, w).then(null, function () { return []; }),
-        subs1x2ForLang(ids, true, w).then(null, function () { return []; })
-      ]).then(function (xs) { return xs[0].concat(xs[1]); });
+      p = subs1x2ForLang(ids, true, w);
     } else {
       /* movie: MERGE both servers - YIFY variants first, then 1x2 variants
          (content-deduped). 1x2-only fallback when YIFY has nothing. */
-      /* user order: NetMirror variants FIRST, then YIFY, then 1x2 */
-      p = Promise.all([
-        nmSubsForLang(ids, false, w).then(null, function () { return []; }),
-        yifyMovieItems(ids.tmdb_id, w).then(null, function () { return []; }),
-        subs1x2ForLang(ids, false, w).then(null, function () { return []; })
-      ]).then(function (xs) {
-        return xs[0].concat(xs[1]).concat(xs[2]);
+      p = yifyMovieItems(ids.tmdb_id, w).then(function (yf) {
+        yf = (yf || []).filter(Boolean);
+        return subs1x2ForLang(ids, false, w).then(function (x2) {
+          x2 = (x2 || []).filter(Boolean);
+          if (!x2.length) return yf;
+          if (!yf.length) return x2;
+          function fp(it) {
+            try {
+              var cues = (typeof it.getContent === 'function') ? it.getContent() : [];
+              var t = '';
+              for (var i = 0; i < cues.length && i < 20; i++) t += '|' + cues[i].start + ':' + cues[i].text;
+              return t;
+            } catch (_e) { return ''; }
+          }
+          var seen = {}, i, f, out = yf.slice();
+          for (i = 0; i < yf.length; i++) { f = fp(yf[i]); if (f) seen[f] = 1; }
+          for (i = 0; i < x2.length; i++) {
+            f = fp(x2[i]);
+            if (f && seen[f]) continue;
+            if (f) seen[f] = 1;
+            out.push(x2[i]);
+          }
+          return out;
+        }, function () { return yf; });
       }).catch(function () {
-        return subs1x2ForLang(ids, false, w).then(null, function () { return []; });
+        return subs1x2ForLang(ids, false, w);
       });
     }
     p = Promise.resolve(p).then(function (items) {
