@@ -18,6 +18,9 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v41-sync: captions now come from the SAME variant the engine plays
+*     (Hindi-first); master-only languages carried over with offset computed
+*     from a common language's first cue (fixes 5s desync on dubs).
 *   + v40-nodedupe: cross-source content dedupe REMOVED - all variants from
 *     every source stay visible and numbered (user order: English 1 = nm,
 *     English 2 = 1x2 ...).
@@ -1736,27 +1739,84 @@ globalThis._extension = (function () {
     if (l === 'in_id') l = 'id';
     return l;
   }
+  /* v41: SYNC FIX. Captions are timed per video file. The engine plays the
+     Hindi-first variant, so captions MUST come from that same variant. Extra
+     languages that only exist on the master/Default variant are carried over
+     with an offset computed from a common language's first cue. */
+  function nmEmbedURL(v, kind, ids) {
+    var u = NMHI_API + '/api/embed-direct/' + encodeURIComponent(v.dubSubjectId) + '?type=' + kind + '&dp=' + encodeURIComponent(v.detailPath || '');
+    if (kind === 'tv') u += '&se=' + (ids.season || 1) + '&ep=' + (ids.episode || 1);
+    return u;
+  }
+  function nmFirstCueStart(url) {
+    return fetchText(url, { 'User-Agent': UA }, 15000).then(function (raw) {
+      if (!raw) return null;
+      var cues = [];
+      try { cues = parseCaption(raw); } catch (_e) { cues = []; }
+      return (cues && cues.length && typeof cues[0].start === 'number') ? cues[0].start : null;
+    }, function () { return null; });
+  }
   function nmCaptions(ids, isTV) {
     var ckey = [ids.tmdb_id, ids.season || 0, ids.episode || 0].join('|');
     var reg = globalThis._nmCapCache || (globalThis._nmCapCache = {});
     var hit = reg[ckey];
     if (hit && (Date.now() - hit.ts) < 10 * 60 * 1000) return hit.p;
     var kind = isTV ? 'tv' : 'movie';
+    var NH = { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' };
     var p = fetchJSON(NMHI_API + '/api/variants-tmdb/' + kind + '/' + encodeURIComponent(String(ids.tmdb_id)) + '?se=' + (ids.season || 1) + '&ep=' + (ids.episode || 1),
-      { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' }, 12000).then(function (j) {
+      NH, 12000).then(function (j) {
       if (!j || j.ok !== true) return [];
       var vs = (j.variants || []).filter(function (v) {
         return v && v.dubSubjectId && v.detailPath && !/sub/i.test(String(v.language || ''));
       });
-      var prim = null, i;
-      for (i = 0; i < vs.length; i++) { if (vs[i].isOriginal) { prim = vs[i]; break; } }
-      if (!prim && vs.length) prim = vs[0];
-      if (!prim && j.defaultSubjectId && j.defaultDetailPath) prim = { dubSubjectId: j.defaultSubjectId, detailPath: j.defaultDetailPath };
-      if (!prim) return [];
-      var u = NMHI_API + '/api/embed-direct/' + encodeURIComponent(prim.dubSubjectId) + '?type=' + kind + '&dp=' + encodeURIComponent(prim.detailPath || '');
-      if (isTV) u += '&se=' + (ids.season || 1) + '&ep=' + (ids.episode || 1);
-      return fetchJSON(u, { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' }, 15000).then(function (d) {
-        return (d && d.captions) || [];
+      /* SAME pick as nmmultiReadHost's sort: Hindi > isOriginal > first */
+      var P = null, i;
+      for (i = 0; i < vs.length; i++) { if (/hindi/i.test(String(vs[i].language || ''))) { P = vs[i]; break; } }
+      if (!P) { for (i = 0; i < vs.length; i++) { if (vs[i].isOriginal) { P = vs[i]; break; } } }
+      if (!P && vs.length) P = vs[0];
+      if (!P && j.defaultSubjectId && j.defaultDetailPath) P = { dubSubjectId: j.defaultSubjectId, detailPath: j.defaultDetailPath };
+      if (!P) return [];
+      return fetchJSON(nmEmbedURL(P, kind, ids), NH, 15000).then(function (d) {
+        var capsP = (d && d.captions) || [];
+        /* master fallback variant: "Default" lang, else first != P */
+        var F = null;
+        for (i = 0; i < vs.length; i++) {
+          if (vs[i].dubSubjectId !== P.dubSubjectId && /^default$/i.test(String(vs[i].language || ''))) { F = vs[i]; break; }
+        }
+        if (!F) { for (i = 0; i < vs.length; i++) { if (vs[i].dubSubjectId !== P.dubSubjectId) { F = vs[i]; break; } } }
+        if (!F) return capsP;
+        return fetchJSON(nmEmbedURL(F, kind, ids), NH, 15000).then(function (dF) {
+          var capsF = (dF && dF.captions) || [];
+          if (!capsP.length) return capsF;
+          if (!capsF.length) return capsP;
+          var haveP = {}, k;
+          for (i = 0; i < capsP.length; i++) haveP[nmCapLan(capsP[i])] = 1;
+          var extra = [];
+          for (i = 0; i < capsF.length; i++) { if (!haveP[nmCapLan(capsF[i])]) extra.push(capsF[i]); }
+          if (!extra.length) return capsP;
+          /* offset via a common language (prefer en): played-start - master-start */
+          var comP = null, comF = null, wantL = ['en'], li;
+          function findCommon(langList) {
+            for (li = 0; li < langList.length; li++) {
+              var a = null, b = null, q;
+              for (q = 0; q < capsP.length; q++) { if (nmCapLan(capsP[q]) === langList[li]) { a = capsP[q]; break; } }
+              if (!a) continue;
+              for (q = 0; q < capsF.length; q++) { if (nmCapLan(capsF[q]) === langList[li]) { b = capsF[q]; break; } }
+              if (b) return [a, b];
+            }
+            return null;
+          }
+          var otherLangs = [];
+          for (i = 0; i < capsP.length; i++) { var kl = nmCapLan(capsP[i]); if (kl !== 'en' && otherLangs.indexOf(kl) < 0) otherLangs.push(kl); }
+          var pair = findCommon(wantL) || findCommon(otherLangs);
+          if (!pair) { for (i = 0; i < extra.length; i++) extra[i].__off = 0; return capsP.concat(extra); }
+          return Promise.all([nmFirstCueStart(pair[0].url), nmFirstCueStart(pair[1].url)]).then(function (st) {
+            var off = (st[0] != null && st[1] != null) ? (st[0] - st[1]) : 0;
+            if (Math.abs(off) > 300000) off = 0; /* sanity: ignore > 5min */
+            for (i = 0; i < extra.length; i++) extra[i].__off = off;
+            return capsP.concat(extra);
+          });
+        }, function () { return capsP; });
       }, function () { return []; });
     }, function () { return []; });
     /* only cache SUCCESSES - a net27 blip must not hide captions for 10 min */
@@ -1777,16 +1837,25 @@ globalThis._extension = (function () {
       }
       return Promise.all(hits.slice(0, 8).map(function (c) {
         var code = nmCapLan(c);
+        var off = (c && c.__off) | 0;
         return fetchText(c.url, { 'User-Agent': UA }, 15000).then(function (raw) {
           if (!raw || raw.indexOf('-->') < 0 || isSpamSub(raw) || !contentMatchesLang(raw, code)) return null;
           var parsed = null;
           return {
-            id: 'nm:' + String(c.url || '').split('?')[0],
+            id: 'nm:' + String(c.url || '').split('?')[0] + (off ? ':off' + off : ''),
             type: 'Video',
             filename: String(c.lanName || code),
             language: code,
             getContent: function () {
-              if (!parsed) { try { parsed = sanitizeCues(parseCaption(raw)); } catch (_pe) { parsed = []; } if (!Array.isArray(parsed)) parsed = []; }
+              if (!parsed) {
+                try { parsed = sanitizeCues(parseCaption(raw)); } catch (_pe) { parsed = []; }
+                if (!Array.isArray(parsed)) parsed = [];
+                if (off) {
+                  for (var qi = 0; qi < parsed.length; qi++) {
+                    parsed[qi] = { start: parsed[qi].start + off, end: parsed[qi].end + off, text: parsed[qi].text };
+                  }
+                }
+              }
               return parsed;
             }
           };
