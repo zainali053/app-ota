@@ -18,6 +18,11 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v36-nmretry: absorb net27 transients INSIDE readHost - variants query
+*     retries once (900ms), and a full second embed round runs when every dub
+*     fails at first. Kills the false red-mark + Mapple auto-failover on hiccups.
+*   + v35-moviemenu: movie subtitle menu marks real YIFY availability (was
+*     calling undefined mark() -> movies always showed generic 14-lang list).
 *   + v34-preflight: NetMirror primary URL preflighted before the player;
 *     dead/cold first URLs get a fresh re-embed (kills black-first-play)
 *   + v33-langlabels: merges "english 2"-style 1x2 variant labels into the
@@ -288,13 +293,25 @@ globalThis._extension = (function () {
     }).catch(function () { return prim; });
   }
 
+  /* v36: net27 hiccups (503 / brief timeouts) must not kill the host.
+     Retry the variants query once, and if EVERY dub embed fails, wait
+     a beat and run one more full embed round - all inside readHost so
+     the app never sees a transient failure (no red mark / failover). */
+  function nmFetchJSONRetry(url, hdrs, t1, t2, delay) {
+    return fetchJSON(url, hdrs, t1).then(null, function () {
+      return new Promise(function (w) { setTimeout(w, delay); }).then(function () {
+        return fetchJSON(url, hdrs, t2);
+      });
+    });
+  }
+
     function nmmultiReadHost(kind, tmdbId, season, episode) {
     if (!tmdbId) return Promise.reject(new Error('nmmulti: no tmdb id'));
     var key = nmCacheKey('nmmulti', kind, String(tmdbId), '', season, episode);
     var hit = nmCacheGet(key);
     if (hit) return Promise.resolve(hit);
-    return fetchJSON(NMHI_API + '/api/variants-tmdb/' + kind + '/' + encodeURIComponent(String(tmdbId)) + '?se=' + (season || 1) + '&ep=' + (episode || 1),
-      { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' }, 12000).then(function (j) {
+    return nmFetchJSONRetry(NMHI_API + '/api/variants-tmdb/' + kind + '/' + encodeURIComponent(String(tmdbId)) + '?se=' + (season || 1) + '&ep=' + (episode || 1),
+      { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' }, 12000, 10000, 900).then(function (j) {
         if (!j || j.ok !== true) throw new Error('nmmulti: no match');
         var dubs = (j.variants || []).filter(function (d) {
           return d && d.dubSubjectId && d.detailPath && d.language && !/sub/i.test(d.language);
@@ -311,7 +328,21 @@ globalThis._extension = (function () {
           }, function () { return null; });
         }).then(function (outs) {
           outs = outs.filter(Boolean);
-          if (!outs.length) throw new Error('nmmulti: no playable dubs');
+          if (!outs.length) {
+            return new Promise(function (w) { setTimeout(w, 1200); }).then(function () {
+              return nmhiEachLimit(dubs, 5, function (d) {
+                return nmhiEmbedRetry(d.subjectId, d.detailPath, kind, season, episode).then(function (r2) {
+                  return { d: d, res: r2 };
+                }, function () { return null; });
+              });
+            }).then(function (outs2) {
+              outs = (outs2 || []).filter(Boolean);
+              if (!outs.length) throw new Error('nmmulti: no playable dubs');
+              return outs;
+            });
+          }
+          return outs;
+        }).then(function (outs) {
           outs.sort(function (a, b) {
             function w(o) {
               if (/hindi/i.test(o.d.lang || '')) return 0;
