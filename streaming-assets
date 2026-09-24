@@ -18,6 +18,9 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+*   + v42-audio: MP4 header inspection for NetMirror ladders - video-only
+*     rungs dropped when audio rungs exist; AAC rung preferred over E-AC3 for
+*     Auto (fixes silent English-1080p on Alice etc.).
 *   + v41-sync: captions now come from the SAME variant the engine plays
 *     (Hindi-first); master-only languages carried over with offset computed
 *     from a common language's first cue (fixes 5s desync on dubs).
@@ -246,6 +249,122 @@ globalThis._extension = (function () {
       return 'unknown';
     }, function () { return 'unknown'; });
   }
+  /* v42: some net27 rungs are video-only transcodes or carry E-AC3 audio the
+     player renders silently. Inspect MP4 headers (ranged fetch) and order the
+     ladder so Auto picks a rung that actually produces sound. */
+  function nmFetchRange(url, rangeHdr, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      var done = false;
+      var to = setTimeout(function () { if (!done) { done = true; reject(new Error('range timeout')); } }, timeoutMs || 12000);
+      Promise.resolve().then(function () {
+        return fetch(url, { headers: { 'User-Agent': UA, 'Referer': 'https://videodownloader.site/', 'Range': rangeHdr } });
+      }).then(function (res) {
+        if (!(res.status === 206 || res.status === 200)) throw new Error('http ' + res.status);
+        if (typeof res.arrayBuffer === 'function') return res.arrayBuffer();
+        throw new Error('no arrayBuffer');
+      }).then(function (buf) {
+        if (done) return; clearTimeout(to); done = true;
+        resolve(new Uint8Array(buf));
+      }).catch(function (e) {
+        if (!done) { clearTimeout(to); done = true; reject(e); }
+      });
+    });
+  }
+  function nmReadU32(u8, off) { return ((u8[off] << 24) | (u8[off + 1] << 16) | (u8[off + 2] << 8) | u8[off + 3]) >>> 0; }
+  function nmBoxType(u8, off) { return String.fromCharCode(u8[off], u8[off + 1], u8[off + 2], u8[off + 3]); }
+  function nmEachBox(u8, start, end, cb) {
+    var off = start;
+    while (off + 8 <= end) {
+      var size = nmReadU32(u8, off);
+      var type = nmBoxType(u8, off + 4);
+      if (size === 1) break; /* largesize - bail safely */
+      if (size === 0) size = end - off;
+      if (size < 8) break;
+      if (cb(off, size, type)) return true;
+      off += size;
+    }
+    return false;
+  }
+  function nmFindMoov(u8) {
+    var found = null;
+    nmEachBox(u8, 0, u8.length, function (off, size, type) {
+      if (type === 'moov') { found = [off, size]; return true; }
+      return false;
+    });
+    return found;
+  }
+  function nmParseMoov(u8, moff, msize) {
+    var out = { audio: false, codec: null };
+    var mend = Math.min(moff + msize, u8.length);
+    nmEachBox(u8, moff + 8, mend, function (toff, tsize, ttype) {
+      if (ttype !== 'trak') return false;
+      var tend = Math.min(toff + tsize, u8.length);
+      var handler = null, codec = null;
+      nmEachBox(u8, toff + 8, tend, function (moff2, msize2, mtype) {
+        if (mtype !== 'mdia') return false;
+        var mend2 = Math.min(moff2 + msize2, u8.length);
+        nmEachBox(u8, moff2 + 8, mend2, function (xoff, xsize, xtype) {
+          if (xtype === 'hdlr' && xoff + 20 <= u8.length) {
+            handler = nmBoxType(u8, xoff + 16);
+          } else if (xtype === 'minf') {
+            var xend = Math.min(xoff + xsize, u8.length);
+            nmEachBox(u8, xoff + 8, xend, function (soff, ssize, stype) {
+              if (stype !== 'stbl') return false;
+              var send = Math.min(soff + ssize, u8.length);
+              nmEachBox(u8, soff + 8, send, function (qoff, qsize, qtype) {
+                if (qtype !== 'stsd') return false;
+                var e = qoff + 16; /* hdr + verflags + entry_count */
+                if (e + 8 <= u8.length) codec = nmBoxType(u8, e + 4);
+                return true;
+              });
+              return false;
+            });
+          }
+          return false;
+        });
+        return true;
+      });
+      if (handler === 'soun') { out.audio = true; if (!out.codec) out.codec = codec; }
+      return false;
+    });
+    return out;
+  }
+  function nmInspectMp4(url) {
+    var HEAD = 3 * 1024 * 1024;
+    return nmFetchRange(url, 'bytes=0-' + (HEAD - 1), 12000).then(function (u8) {
+      var m = nmFindMoov(u8);
+      if (m) return nmParseMoov(u8, m[0], m[1]);
+      return nmFetchRange(url, 'bytes=-' + HEAD, 12000).then(function (t8) {
+        var m2 = nmFindMoov(t8);
+        if (m2 && m2[0] + m2[1] <= t8.length) return nmParseMoov(t8, m2[0], m2[1]);
+        return { audio: 'unknown', codec: null };
+      }, function () { return { audio: 'unknown', codec: null }; });
+    }, function () { return { audio: 'unknown', codec: null }; });
+  }
+  function nmFindAacRung(list) {
+    if (!list.length) return Promise.resolve(null);
+    return nmInspectMp4(list[0].s.url).then(function (info) {
+      if (info.audio === true && /^mp4a$/i.test(String(info.codec || ''))) return list[0];
+      return nmFindAacRung(list.slice(1));
+    }, function () { return nmFindAacRung(list.slice(1)); });
+  }
+  function nmAudioOrder(alive) {
+    if (alive.length < 2) return Promise.resolve(alive);
+    var top = alive[0];
+    return nmInspectMp4(top.s.url).then(function (info) {
+      if (info.audio === false) return nmAudioOrder(alive.slice(1));
+      if (info.audio === true && /^(ec-3|ac-3|eac3)$/i.test(String(info.codec || ''))) {
+        return nmFindAacRung(alive.slice(1)).then(function (aac) {
+          if (!aac) return alive;
+          var out = [aac, top], i;
+          for (i = 1; i < alive.length; i++) { if (alive[i] !== aac) out.push(alive[i]); }
+          return out;
+        });
+      }
+      return alive;
+    }, function () { return alive; });
+  }
+
   function nmhiEmbed(sid, dp, kind, season, episode) {
     var u = NMHI_API + '/api/embed-direct/' + encodeURIComponent(sid) + '?type=' + kind + '&dp=' + encodeURIComponent(dp || '');
     if (kind === 'tv') u += '&se=' + (season || 1) + '&ep=' + (episode || 1);
@@ -261,6 +380,9 @@ globalThis._extension = (function () {
       });
       return Promise.all(probes).then(function (res2) {
         var alive = res2.filter(function (x) { return x.st !== 'dead'; });
+        if (!alive.length) throw new Error('nmhi: streams dead');
+        return nmAudioOrder(alive);
+      }).then(function (alive) {
         if (!alive.length) throw new Error('nmhi: streams dead');
         var best = alive[0].s.url;
         var dq = [{ quality: 'Auto', file: best }];
