@@ -18,6 +18,7 @@
  *          MovieBox (macdn CDN unplayable on device NW), Videasy
  *          direct (backend DNS dead).
  * Subtitles: HYBRID v2 — YIFY (movies, human-made) + 1x2.space (TV/all, incl. Urdu)
+ *           + v57-nmcapfix: net27 captions were dead since v37 (_h.j vs _h.res) — revived
 *   + v44-playable: promotes AAC/transcode-family rung whenever the top rung
 *     has a player-silent codec (E-AC3/AC-3/AC-4...) or unknown audio; desc
 *     diag removed.
@@ -1975,7 +1976,11 @@ globalThis._extension = (function () {
       });
     }).then(function (_h) {
       if (!_h) return [];
-      var j = _h.j, cdom = _h.dom;
+      /* v57 fix: nmTryDomains wraps the worker result as {dom, res} (see
+         lines ~409/494). v37 read _h.j -> always undefined -> TypeError ->
+         captions source silently returned [] for every title since v37. */
+      var _r = _h.res || _h;
+      var j = _r.j, cdom = _r.dom || _h.dom;
       var CNH = nmHdr(cdom);
       var vs = (j.variants || []).filter(function (v) {
         return v && v.dubSubjectId && v.detailPath && !/sub/i.test(String(v.language || ''));
