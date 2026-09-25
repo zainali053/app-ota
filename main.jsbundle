@@ -2485,33 +2485,43 @@ __d((function(g,r,i,a,m,e,d){Object.defineProperty(e,"__esModule",{value:!0}),e.
 __d((function(g,r,i,a,m,e,d){Object.defineProperty(e,"__esModule",{value:!0}),Object.defineProperty(e,"TouchableHighlight",{enumerable:!0,get:function(){return t.TouchableHighlight}}),Object.defineProperty(e,"TouchableOpacity",{enumerable:!0,get:function(){return t.TouchableOpacity}}),Object.defineProperty(e,"TouchableWithoutFeedback",{enumerable:!0,get:function(){return t.TouchableWithoutFeedback}});var t=r(d[0])}),2262,[2]);
 __d((function(k,a,e,t,d,r,s){d.exports={name:"mv2532",displayName:"mv2532","react-native-google-mobile-ads":{android_app_id:"",ios_app_id:"",user_tracking_usage_description:"",delay_app_measurement_init:!0,sk_ad_network_items:[]}}}),2263,[]);
 __r(53);
-/* ===== OTA-BUNDLE-LOADER v1 =====
-   Fetches the FULL app bundle from GitHub and runs it; falls back to the
-   embedded bundle if fetch/eval fails. Every future bundle keeps this loader
-   so updates stay OTA forever. Remote bundle marks success via __otaBoot. */
+/* ===== OTA-BUNDLE-LOADER v2 =====
+   Boots SYNCHRONOUSLY from the cached GitHub bundle (MMKV), then refreshes
+   the cache in the background for the NEXT launch. (v1 fetched at boot and
+   crashed: native fires AppRegistry.runApplication before an async fetch
+   could register the app.) Corrupt cache self-heals: failed eval deletes it. */
 (function () {
   function bootLocal() {
-    try { globalThis.__otaBoot = 1; } catch (e) {}
-    try { __r(0); } catch (e) {}
+    var ok = false;
+    try { __r(0); ok = true; } catch (e) {}
+    if (ok) { try { globalThis.__otaBoot = 1; } catch (e) {} }
   }
   if (globalThis.__otaLoaderRan) { bootLocal(); return; }
   globalThis.__otaLoaderRan = 1;
   var REMOTE = 'https://raw.githubusercontent.com/zainali053/app-ota/main/main.jsbundle';
-  var started = false;
-  function finishLocal() { if (!started) { started = true; clearTimeout(guard); bootLocal(); } }
-  function looksValid(c) {
-    return typeof c === 'string' && c.length > 3000000 && c.indexOf('__d(') >= 0 && c.indexOf('__otaBoot') >= 0;
+  var CK = '@ota.bundle.v1';
+  var store = null;
+  try { store = __r(592).mmkvStorage; } catch (e) {}
+  function valid(c) { return typeof c === 'string' && c.length > 3000000 && c.indexOf('__d(') >= 0 && c.indexOf('__otaBoot') >= 0; }
+  var booted = false;
+  if (store) {
+    var cached = null;
+    try { cached = store.getString(CK); } catch (e) {}
+    if (valid(cached)) {
+      try { globalThis.__otaBoot = 0; (0, eval)(cached); } catch (e) { globalThis.__otaBoot = 0; }
+      booted = (globalThis.__otaBoot === 1);
+      if (!booted) { try { if (store.deleteItem) store.deleteItem(CK); else if (store.delete) store.delete(CK); } catch (e) {} }
+    }
   }
-  var guard = setTimeout(finishLocal, 8000);
+  if (!booted) bootLocal();
+  /* background refresh -> applies on next launch */
   try {
-    fetch(REMOTE + '?cb=' + Date.now()).then(function (res) {
-      if (!res.ok) throw new Error('http ' + res.status);
-      return res.text();
+    fetch(REMOTE + '?cb=' + Date.now()).then(function (r) {
+      if (!r.ok) throw new Error('http ' + r.status);
+      return r.text();
     }).then(function (code) {
-      if (started) return;
-      if (!looksValid(code)) { finishLocal(); return; }
-      try { globalThis.__otaBoot = 0; (0, eval)(code); } catch (e) { globalThis.__otaBoot = 0; }
-      if (globalThis.__otaBoot === 1) { started = true; clearTimeout(guard); } else { finishLocal(); }
-    }, function () { finishLocal(); });
-  } catch (e) { finishLocal(); }
+      if (!valid(code) || !store) return;
+      try { if (code !== store.getString(CK)) store.setString(CK, code); } catch (e) {}
+    }, function () {});
+  } catch (e) {}
 })();
