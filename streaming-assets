@@ -242,7 +242,7 @@ globalThis._extension = (function () {
   /* ================= Host 1: NetMirror Multi (v11 intact) ================= */
   /* v52: NetMirror serves the SAME library from multiple front doors.
      Try them in order so one crashed/blocked domain never kills the lane. */
-  var NM_DOMAINS = ['https://net27.cc', 'https://net77.cc']; /* v53: net77 origin is 522-down as of 25-Sep; net27 first */
+  var NM_DOMAINS = ['https://net27.cc']; /* v54: net77 removed by user order (origin 522-down) */
   var NMHI_API = NM_DOMAINS[0];
   function nmHdr(dom) { return { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': dom + '/' }; }
   function nmTryDomains(worker) {
