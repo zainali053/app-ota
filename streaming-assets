@@ -588,41 +588,6 @@ globalThis._extension = (function () {
   /* ================= Host 2: Mapple 4K | Host 3: vidrack direct (movy) ================= */
   var VX_DIRECT = 'https://vidrack.created.app/api/sources/';
   var VX_PROXY = 'https://box-prox.jeannefrankli-n2-7-2-0-5.workers.dev/https://vidrack.created.app/api/sources/';
-  /* ---------- v55: EPISODE INTEGRITY GUARD ----------
-     Providers sometimes mislabel files (Stranger Things S1E1 served E2/E8
-     content on mapple.fun AND movy). Defense: compare each stream's real
-     playlist duration to TMDB's episode/movie runtime; drop/reject anything
-     off by more than 5 minutes. Unknown runtime => guard off (never break). */
-  function m3uDurSec(m3u) {
-    var m = String(m3u).match(/#EXTINF:([\d.]+)/g), t = 0, i;
-    if (!m || m.length < 3) return null;
-    for (i = 0; i < m.length; i++) t += parseFloat(m[i].slice(8)) || 0;
-    return t;
-  }
-  function tmdbExpectedMin(kind, tmdbId, season, episode) {
-    var rkey = 'rt|' + kind + '|' + tmdbId + '|' + (season || 0) + '|' + (episode || 0);
-    var reg = globalThis._tmdbRt || (globalThis._tmdbRt = {});
-    if (reg[rkey]) return reg[rkey];
-    var url = kind === 'tv'
-      ? 'https://api.themoviedb.org/3/tv/' + tmdbId + '/season/' + (season || 1) + '?api_key=' + TMDB_API_KEY
-      : 'https://api.themoviedb.org/3/movie/' + tmdbId + '?api_key=' + TMDB_API_KEY;
-    var p = fetchJSON(url, { 'User-Agent': UA }, 10000).then(function (j) {
-      if (kind === 'tv') {
-        var eps = (j && j.episodes) || [], i;
-        for (i = 0; i < eps.length; i++) {
-          if (eps[i] && (eps[i].episode_number | 0) === (episode | 0)) return (typeof eps[i].runtime === 'number' && eps[i].runtime > 0) ? eps[i].runtime : null;
-        }
-        return null;
-      }
-      return (j && typeof j.runtime === 'number' && j.runtime > 0) ? j.runtime : null;
-    }, function () { return null; }).then(function (r) {
-      if (r === null) { try { delete reg[rkey]; } catch (_e) { } }
-      return r;
-    });
-    reg[rkey] = p;
-    return p;
-  }
-
   function vxFetch(source, tmdbId, kind, season, episode) {
     var q = '?id=' + encodeURIComponent(String(tmdbId)) + '&type=' + (kind === 'tv' ? 'tv&season=' + (season || 1) + '&episode=' + (episode || 1) : 'movie');
     return fetchJSON(VX_DIRECT + source + q, { 'User-Agent': UA, 'Accept': 'application/json' }, 20000).then(function (j) {
@@ -756,7 +721,6 @@ globalThis._extension = (function () {
     var key = nmCacheKey(tag, kind, String(tmdbId), '', season, episode);
     var hit = nmCacheGet(key);
     if (hit) return Promise.resolve(hit);
-    var rtP = tmdbExpectedMin(kind, tmdbId, season, episode);
     return vxFetch(source, tmdbId, kind, season, episode).then(function (j) {
       var sources = ((j && j.sources) || []).filter(function (s) { return s && s.url; });
       if (!sources.length) throw new Error(tag + ': no sources');
@@ -794,27 +758,20 @@ globalThis._extension = (function () {
         var probe = function (u) {
           return fetchText(u, { 'User-Agent': UA, 'Referer': r }, 8000).then(function (m3u) {
             if (!m3u || m3u.indexOf('#EXTM3U') < 0) return null;
-            if (m3u.indexOf('#EXT-X-STREAM-INF') >= 0) return { s: s, holes: 0, file: u, durSec: null };
-            return vxSampleHoles(u, m3u, r).then(function (holes) { return { s: s, holes: holes, file: u, durSec: m3uDurSec(m3u) }; }, function () { return { s: s, holes: 0, file: u, durSec: m3uDurSec(m3u) }; });
+            if (m3u.indexOf('#EXT-X-STREAM-INF') >= 0) return { s: s, holes: 0, file: u };
+            return vxSampleHoles(u, m3u, r).then(function (holes) { return { s: s, holes: holes, file: u }; }, function () { return { s: s, holes: 0, file: u }; });
           }).then(null, function () { return null; });
         };
         var inner = unwrapProxy(s.url);
         if (!inner) return probe(s.url);
         return probe(inner).then(function (res) { return res || probe(s.url); });
       });
-      return Promise.all([Promise.all(checks), rtP]).then(function (pair) {
-        var results = pair[0], expMin = pair[1];
+      return Promise.all(checks).then(function (results) {
         var good = results.filter(function (x) { return !!x; });
         if (!good.length) throw new Error(tag + ': all rungs dead');
         var clean = good.filter(function (x) { return x.holes < 2; });
         if (!clean.length) throw new Error(tag + ': all rungs holey');
         var keep = clean;
-        if (expMin) {
-          var rightEp = keep.filter(function (x) {
-            return !(x.durSec) || Math.abs(x.durSec / 60 - expMin) <= 5;
-          });
-          if (rightEp.length) keep = rightEp; /* wrong-episode files dropped */
-        }
         var seen = {}, quals = [{ quality: 'Auto', file: keep[0].file || keep[0].s.url }];
         keep.forEach(function (x) {
           var label = realQ(x.s);
@@ -1115,33 +1072,7 @@ globalThis._extension = (function () {
         });
       })
       .then(function (tok) { return mpBestHoster(tok, mediaType, tvSlug, tmdbId); })
-      .then(function (res) { return mpDurationGuard(res, kind, tmdbId, season, episode); })
       .then(function (res) { nmCacheSet(key, res); return res; });
-  }
-  function mpDurationGuard(res, kind, tmdbId, season, episode) {
-    return tmdbExpectedMin(kind, tmdbId, season, episode).then(function (expMin) {
-      if (!expMin || !res || !res.url) return res;
-      var hd = res.headers || {};
-      function durCheck(m3u) {
-        var dur = m3uDurSec(m3u);
-        if (dur && Math.abs(dur / 60 - expMin) > 5) throw new Error('mp: episode duration mismatch');
-        return res;
-      }
-      return fetchText(res.url, { 'User-Agent': UA, 'Referer': hd.Referer || '' }, 10000).then(function (pl) {
-        if (!pl || pl.indexOf('#EXTM3U') < 0) return res;
-        if (pl.indexOf('#EXT-X-STREAM-INF') < 0) return durCheck(pl);
-        var lines = pl.split(String.fromCharCode(10)), vu = null, i2;
-        for (i2 = 0; i2 < lines.length; i2++) {
-          var ln = String(lines[i2]).trim();
-          if (ln && ln.charAt(0) !== '#') { vu = vxResolveSeg(res.url, ln); break; }
-        }
-        if (!vu) return res;
-        return fetchText(vu, { 'User-Agent': UA, 'Referer': hd.Referer || '' }, 10000).then(function (m2) {
-          if (!m2 || m2.indexOf('#EXTM3U') < 0) return res;
-          return durCheck(m2);
-        }, function () { return res; });
-      }, function () { return res; });
-    }, function () { return res; });
   }
 
   /* ---- base64 helpers (no Buffer/atob dependency) ---- */
