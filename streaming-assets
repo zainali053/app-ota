@@ -2164,132 +2164,6 @@ globalThis._extension = (function () {
     return out;
   }
 
-  /* ---------- v50: LEARNED per-title timing (slider teaches engine) ----------
-     App speed-menu slider -> bundle patch -> _extension.learnTimingOffset(v).
-     Engine remembers v (seconds) per mediaKey, persists via __syncSave, and on
-     every later playback shifts delivered cues by -v*1000ms so the slider is
-     never needed again for that title. */
-  function applyLearnedOffset(items) {
-    try {
-      var key = String(globalThis._streamMediaKey || '');
-      if (!key || !items || !items.length) return items;
-      var mem = globalThis._syncMem || {};
-      var v = mem[key];
-      if (v === undefined || v === null) return items;
-      var ls = globalThis._syncLearnedSession || {};
-      if (ls[key]) return items; /* slider is live-shifting this session */
-      var ms = -Math.round(Number(v) * 1000);
-      if (!ms) return items;
-      for (var i = 0; i < items.length; i++) {
-        (function (it) {
-          if (!it || typeof it.getContent !== 'function') return;
-          var orig = it.getContent;
-          it.getContent = function () {
-            var c = orig.call(it), out = [], j;
-            if (!c || !c.length) return c;
-            for (j = 0; j < c.length; j++) out.push({ start: c[j].start + ms, end: c[j].end + ms, text: c[j].text });
-            return out;
-          };
-        })(items[i]);
-      }
-    } catch (_e50) { }
-    return items;
-  }
-  var _saveT = null;
-  function learnTimingOffset(v) {
-    try {
-      v = Number(v); if (!isFinite(v)) return;
-      var key = String(globalThis._streamMediaKey || '');
-      if (!key) return;
-      var mem = globalThis._syncMem || (globalThis._syncMem = {});
-      mem[key] = v;
-      var ls = globalThis._syncLearnedSession || (globalThis._syncLearnedSession = {});
-      ls[key] = true;
-      if (_saveT) clearTimeout(_saveT);
-      _saveT = setTimeout(function () {
-        try { if (globalThis.__syncSave) globalThis.__syncSave(JSON.stringify(globalThis._syncMem || {})); } catch (_e) { }
-      }, 900);
-    } catch (_e50) { }
-  }
-  (function () {
-    var tries = 0;
-    var poll = function () {
-      try {
-        if (globalThis.__syncLoad && !globalThis._syncMemLoaded) {
-          globalThis._syncMemLoaded = true;
-          globalThis.__syncLoad().then(function (m) { globalThis._syncMem = m || {}; }, function () { });
-          return;
-        }
-      } catch (_e) { }
-      if (++tries < 20) setTimeout(poll, 1000);
-    };
-    setTimeout(poll, 600);
-  })();
-
-  /* ---------- v49: AUTO-SYNC subtitles against NetMirror reference ----------
-     NetMirror captions are timed to the exact video files the site serves,
-     so they act as the reference timeline. Every non-NetMirror subtitle
-     (YIFY / 1x2) is linearly remapped onto that reference (first+last cue
-     fit) whenever it disagrees by more than 1.5s - fixing both fixed offsets
-     and FPS drift automatically. Subs that already agree are untouched. */
-  function nmRefCues(ids, isTV, w) {
-    var rkey = [ids.tmdb_id, ids.season || 0, ids.episode || 0, w].join('|');
-    var reg = globalThis._nmRefReg || (globalThis._nmRefReg = {});
-    if (reg[rkey]) return reg[rkey];
-    var p = nmSubsForLang(ids, isTV, w).then(function (rs) {
-      for (var i = 0; i < rs.length; i++) {
-        try {
-          var c = rs[i].getContent();
-          if (c && c.length >= 10) return c;
-        } catch (_e) { }
-      }
-      return null;
-    }, function () { return null; });
-    reg[rkey] = p;
-    return p;
-  }
-  function linearRemapCues(cues, ref) {
-    if (!cues || cues.length < 10 || !ref || ref.length < 10) return null;
-    var c0 = cues[0].start, cN = cues[cues.length - 1].start;
-    var r0 = ref[0].start, rN = ref[ref.length - 1].start;
-    var off0 = c0 - r0, off1 = cN - rN;
-    if (Math.abs(off0) <= 1500 && Math.abs(off1) <= 1500) return null; /* agrees */
-    var spanC = cN - c0, spanR = rN - r0;
-    if (spanC < 60000 || spanR < 60000) return null;
-    var slope = spanR / spanC;
-    if (slope < 0.85 || slope > 1.18) return null; /* different cut - don't break */
-    var out = [], i;
-    for (i = 0; i < cues.length; i++) {
-      var ns = Math.round(r0 + (cues[i].start - c0) * slope);
-      var dur = Math.max(500, cues[i].end - cues[i].start);
-      out.push({ start: ns, end: ns + dur, text: cues[i].text });
-    }
-    return out;
-  }
-  function nmAutoSyncItems(items, ids, isTV, w) {
-    var need = false, i;
-    for (i = 0; i < items.length; i++) {
-      if (items[i] && String(items[i].id || '').indexOf('nm:') !== 0) { need = true; break; }
-    }
-    if (!need) return Promise.resolve(items);
-    return nmRefCues(ids, isTV, w).then(function (ref) {
-      if (!ref) return items;
-      for (var j = 0; j < items.length; j++) {
-        var it = items[j];
-        if (!it || String(it.id || '').indexOf('nm:') === 0) continue;
-        var fixed = null;
-        try { fixed = linearRemapCues(it.getContent(), ref); } catch (_e) { }
-        if (fixed) {
-          (function (it2, fx) {
-            it2.getContent = function () { return fx; };
-            it2.autoSynced = true;
-          })(it, fixed);
-        }
-      }
-      return items;
-    }, function () { return items; });
-  }
-
   /* ---------- v32: single-flight loader + full prefetch ---------- */
   /* One loader per title+language (single-flight): whoever asks first runs
      the download, everyone else (incl. the prefetcher) awaits the same
@@ -2326,8 +2200,8 @@ globalThis._extension = (function () {
     }
     p = Promise.resolve(p).then(function (items) {
       items = (items || []).filter(Boolean);
-      if (!items.length) { try { delete reg[lkey]; } catch (_e) { } return items; }
-      return nmAutoSyncItems(items, ids, isTV, w).then(function () { return applyLearnedOffset(items); }, function () { return applyLearnedOffset(items); });
+      if (!items.length) { try { delete reg[lkey]; } catch (_e) { } }
+      return items;
     }).catch(function () {
       try { delete reg[lkey]; } catch (_e) { }
       return [];
@@ -2413,7 +2287,6 @@ globalThis._extension = (function () {
     getHosts: getHosts,
     getSuportLanguages: getSuportLanguages,
     getDefaultLanguage: getDefaultLanguage,
-    learnTimingOffset: learnTimingOffset,
     searchSubtitle: searchSubtitle,
     translateSubs: translateSubs,
     translateI18nFile: translateI18nFile,
