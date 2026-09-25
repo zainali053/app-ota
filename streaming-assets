@@ -180,15 +180,16 @@ globalThis._extension = (function () {
   /* TEMP DIAGNOSTIC: read bundle-OTA loader status from MMKV and surface it
      as a fake language row in the subtitle menu (visible to user for debug). */
   function otaDebugRow() {
+    var info = 'e58f';
     try {
-      if (typeof globalThis.mmkvCreateNewInstance !== 'function') return null;
-      var inst = globalThis.__otaDbg || (globalThis.__otaDbg = globalThis.mmkvCreateNewInstance({ id: 'user-mmkv-storage', encryptionKey: 'iv-string' }));
-      if (!inst || typeof inst.getString !== 'function') return null;
-      var cur = inst.getString('@ota.log') || '-';
-      var prv = inst.getString('@ota.prev') || '-';
-      var msg = 'NOW: ' + cur + ' | PREV: ' + prv;
-      return { id: 'sublanguageid-otadbg', code: 'otadbg', name: msg, nativeName: msg };
-    } catch (_e) { return null; }
+      if (typeof globalThis.mmkvCreateNewInstance !== 'function') { info += '|mmkv:none'; }
+      else {
+        var inst = globalThis.__otaDbg || (globalThis.__otaDbg = globalThis.mmkvCreateNewInstance({ id: 'user-mmkv-storage', encryptionKey: 'iv-string' }));
+        if (!inst || typeof inst.getString !== 'function') { info += '|mmkv:nofn'; }
+        else { info += '|NOW:' + (inst.getString('@ota.log') || '-') + '|PREV:' + (inst.getString('@ota.prev') || '-'); }
+      }
+    } catch (_e) { info += '|mmkv-err:' + String((_e && _e.message) || '?').slice(0, 40); }
+    return { id: 'sublanguageid-otadbg', code: 'otadbg', name: info, nativeName: info };
   }
   function getSuportLanguages() {
     var dbg = otaDebugRow();
