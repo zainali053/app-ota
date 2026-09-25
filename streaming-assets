@@ -240,7 +240,21 @@ globalThis._extension = (function () {
   }
 
   /* ================= Host 1: NetMirror Multi (v11 intact) ================= */
-  var NMHI_API = 'https://net27.cc';
+  /* v52: NetMirror serves the SAME library from multiple front doors.
+     Try them in order so one crashed/blocked domain never kills the lane. */
+  var NM_DOMAINS = ['https://net77.cc', 'https://net27.cc'];
+  var NMHI_API = NM_DOMAINS[0];
+  function nmHdr(dom) { return { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': dom + '/' }; }
+  function nmTryDomains(worker) {
+    function step(i) {
+      if (i >= NM_DOMAINS.length) return Promise.resolve(null);
+      var dom = NM_DOMAINS[i];
+      return Promise.resolve().then(function () { return worker(dom); }).then(function (res) {
+        return res ? { dom: dom, res: res } : step(i + 1);
+      }, function () { return step(i + 1); });
+    }
+    return step(0);
+  }
   /* Probe one net27 stream file: 'alive' (200/206), 'dead' (definite http
    * error) or 'unknown' (timeout/network). Unknown is KEPT (benefit of the
    * doubt on slow nets); only provably-dead files are dropped. */
@@ -383,10 +397,16 @@ globalThis._extension = (function () {
   }
 
   function nmhiEmbed(sid, dp, kind, season, episode) {
-    var u = NMHI_API + '/api/embed-direct/' + encodeURIComponent(sid) + '?type=' + kind + '&dp=' + encodeURIComponent(dp || '');
+    var u = '/api/embed-direct/' + encodeURIComponent(sid) + '?type=' + kind + '&dp=' + encodeURIComponent(dp || '');
     if (kind === 'tv') u += '&se=' + (season || 1) + '&ep=' + (episode || 1);
-    return fetchJSON(u, { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' }, 15000).then(function (j) {
-      if (!j || j.ok !== true || j.mode === 'none' || !((j.streams || []).length)) throw new Error('nmhi: unavailable');
+    return nmTryDomains(function (dom) {
+      return fetchJSON(dom + u, nmHdr(dom), 15000).then(function (j) {
+        if (!j || j.ok !== true || j.mode === 'none' || !((j.streams || []).length)) return null;
+        return j;
+      });
+    }).then(function (_h) {
+      if (!_h) throw new Error('nmhi: unavailable');
+      var j = _h.res;
       var streams = j.streams.filter(function (s) { return s && s.url && s.resolution; });
       if (!streams.length) throw new Error('nmhi: no streams');
       streams.sort(function (a, b) { return b.resolution - a.resolution; });
@@ -463,9 +483,15 @@ globalThis._extension = (function () {
     var key = nmCacheKey('nmmulti', kind, String(tmdbId), '', season, episode);
     var hit = nmCacheGet(key);
     if (hit) return Promise.resolve(hit);
-    return nmFetchJSONRetry(NMHI_API + '/api/variants-tmdb/' + kind + '/' + encodeURIComponent(String(tmdbId)) + '?se=' + (season || 1) + '&ep=' + (episode || 1),
-      { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' }, 12000, 10000, 900).then(function (j) {
-        if (!j || j.ok !== true) throw new Error('nmmulti: no match');
+    var vpath = '/api/variants-tmdb/' + kind + '/' + encodeURIComponent(String(tmdbId)) + '?se=' + (season || 1) + '&ep=' + (episode || 1);
+    return nmTryDomains(function (dom) {
+      return nmFetchJSONRetry(dom + vpath, nmHdr(dom), 12000, 10000, 900).then(function (j) {
+        if (!j || j.ok !== true) return null;
+        return j;
+      });
+    }).then(function (_h) {
+      if (!_h) throw new Error('nmmulti: no match');
+      var j = _h.res;
         var dubs = (j.variants || []).filter(function (d) {
           return d && d.dubSubjectId && d.detailPath && d.language && !/sub/i.test(d.language);
         }).map(function (d) {
@@ -1892,8 +1918,8 @@ globalThis._extension = (function () {
      Hindi-first variant, so captions MUST come from that same variant. Extra
      languages that only exist on the master/Default variant are carried over
      with an offset computed from a common language's first cue. */
-  function nmEmbedURL(v, kind, ids) {
-    var u = NMHI_API + '/api/embed-direct/' + encodeURIComponent(v.dubSubjectId) + '?type=' + kind + '&dp=' + encodeURIComponent(v.detailPath || '');
+  function nmEmbedURL(v, kind, ids, dom) {
+    var u = (dom || NMHI_API) + '/api/embed-direct/' + encodeURIComponent(v.dubSubjectId) + '?type=' + kind + '&dp=' + encodeURIComponent(v.detailPath || '');
     if (kind === 'tv') u += '&se=' + (ids.season || 1) + '&ep=' + (ids.episode || 1);
     return u;
   }
@@ -1912,9 +1938,16 @@ globalThis._extension = (function () {
     if (hit && (Date.now() - hit.ts) < 10 * 60 * 1000) return hit.p;
     var kind = isTV ? 'tv' : 'movie';
     var NH = { 'User-Agent': UA, 'Accept': 'application/json', 'Referer': NMHI_API + '/' };
-    var p = fetchJSON(NMHI_API + '/api/variants-tmdb/' + kind + '/' + encodeURIComponent(String(ids.tmdb_id)) + '?se=' + (ids.season || 1) + '&ep=' + (ids.episode || 1),
-      NH, 12000).then(function (j) {
-      if (!j || j.ok !== true) return [];
+    var cvp = '/api/variants-tmdb/' + kind + '/' + encodeURIComponent(String(ids.tmdb_id)) + '?se=' + (ids.season || 1) + '&ep=' + (ids.episode || 1);
+    var p = nmTryDomains(function (dom) {
+      return fetchJSON(dom + cvp, nmHdr(dom), 12000).then(function (j) {
+        if (!j || j.ok !== true) return null;
+        return { j: j, dom: dom };
+      });
+    }).then(function (_h) {
+      if (!_h) return [];
+      var j = _h.j, cdom = _h.dom;
+      var CNH = nmHdr(cdom);
       var vs = (j.variants || []).filter(function (v) {
         return v && v.dubSubjectId && v.detailPath && !/sub/i.test(String(v.language || ''));
       });
@@ -1925,7 +1958,7 @@ globalThis._extension = (function () {
       if (!P && vs.length) P = vs[0];
       if (!P && j.defaultSubjectId && j.defaultDetailPath) P = { dubSubjectId: j.defaultSubjectId, detailPath: j.defaultDetailPath };
       if (!P) return [];
-      return fetchJSON(nmEmbedURL(P, kind, ids), NH, 15000).then(function (d) {
+      return fetchJSON(nmEmbedURL(P, kind, ids, cdom), CNH, 15000).then(function (d) {
         var capsP = (d && d.captions) || [];
         /* master fallback variant: "Default" lang, else first != P */
         var F = null;
@@ -1934,7 +1967,7 @@ globalThis._extension = (function () {
         }
         if (!F) { for (i = 0; i < vs.length; i++) { if (vs[i].dubSubjectId !== P.dubSubjectId) { F = vs[i]; break; } } }
         if (!F) return capsP;
-        return fetchJSON(nmEmbedURL(F, kind, ids), NH, 15000).then(function (dF) {
+        return fetchJSON(nmEmbedURL(F, kind, ids, cdom), CNH, 15000).then(function (dF) {
           var capsF = (dF && dF.captions) || [];
           if (!capsP.length) return capsF;
           if (!capsF.length) return capsP;
