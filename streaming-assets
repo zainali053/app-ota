@@ -2196,7 +2196,7 @@ globalThis._extension = (function () {
     return items;
   }
   var _saveT = null;
-  globalThis._extension.learnTimingOffset = function (v) {
+  function learnTimingOffset(v) {
     try {
       v = Number(v); if (!isFinite(v)) return;
       var key = String(globalThis._streamMediaKey || '');
@@ -2210,7 +2210,7 @@ globalThis._extension = (function () {
         try { if (globalThis.__syncSave) globalThis.__syncSave(JSON.stringify(globalThis._syncMem || {})); } catch (_e) { }
       }, 900);
     } catch (_e50) { }
-  };
+  }
   (function () {
     var tries = 0;
     var poll = function () {
@@ -2413,6 +2413,7 @@ globalThis._extension = (function () {
     getHosts: getHosts,
     getSuportLanguages: getSuportLanguages,
     getDefaultLanguage: getDefaultLanguage,
+    learnTimingOffset: learnTimingOffset,
     searchSubtitle: searchSubtitle,
     translateSubs: translateSubs,
     translateI18nFile: translateI18nFile,
