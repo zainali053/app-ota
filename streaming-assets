@@ -177,11 +177,25 @@ globalThis._extension = (function () {
     { id: 'sublanguageid-nld', code: 'nl', name: 'Nederlands' }
   ];
 
+  /* TEMP DIAGNOSTIC: read bundle-OTA loader status from MMKV and surface it
+     as a fake language row in the subtitle menu (visible to user for debug). */
+  function otaDebugRow() {
+    try {
+      if (typeof globalThis.mmkvCreateNewInstance !== 'function') return null;
+      var inst = globalThis.__otaDbg || (globalThis.__otaDbg = globalThis.mmkvCreateNewInstance({ id: 'user-mmkv-storage', encryptionKey: 'iv-string' }));
+      if (!inst || typeof inst.getString !== 'function') return null;
+      var cur = inst.getString('@ota.log') || '-';
+      var prv = inst.getString('@ota.prev') || '-';
+      var msg = 'NOW: ' + cur + ' | PREV: ' + prv;
+      return { id: 'sublanguageid-otadbg', code: 'otadbg', name: msg, nativeName: msg };
+    } catch (_e) { return null; }
+  }
   function getSuportLanguages() {
+    var dbg = otaDebugRow();
     try {
       var c = globalThis._subLangCache;
       if (c && (Date.now() - c.ts) < SUB_LANG_TTL) {
-        if (!c.codes) return LANGS.slice();
+        if (!c.codes) return dbg ? [dbg].concat(LANGS.slice()) : LANGS.slice();
         var out = [], present = {}, i, l;
         for (i = 0; i < LANGS.length; i++) {
           l = LANGS[i];
@@ -197,10 +211,10 @@ globalThis._extension = (function () {
         for (i = 0; i < extra.length; i++) {
           out.push({ id: 'sublanguageid-' + extra[i], code: extra[i], name: subLangName(extra[i]) });
         }
-        return out; /* [] when servers have nothing for this title */
+        return dbg ? [dbg].concat(out) : out; /* [] when servers have nothing for this title */
       }
     } catch (_e) { }
-    return LANGS.slice();
+    return dbg ? [dbg].concat(LANGS.slice()) : LANGS.slice();
   }
   function getDefaultLanguage() { return LANGS[0]; }
 
