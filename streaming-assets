@@ -789,7 +789,12 @@ globalThis._extension = (function () {
    * key has its own catalog; 'playback-unavailable' flakes are normal — fall to
    * the next hoster. Playback needs Referer: https://mapple.fun/ on every URL. */
   var MP_BASE = 'https://mapple.fun';
-  var MP_HOSTERS = ['mapple', 's25', 's2', 's4', 's19'];
+  /* v56: full server map discovered from mapple.fun web bundle
+     (Zeus=mapple, Poseidon=s25, Athena=s2, Hera=s4, Apollo=s19,
+      Atlas=s1, Hestia=s3, Nike=s5, Aphrodite=s6, Demeter=s7,
+      Dionysus=s8, Prometheus=s10, Persephone=s12, Hephaestus=s15,
+      Hades=s16, Hermes=s26, Astraeus=s28) */
+  var MP_HOSTERS = ['mapple', 's25', 's2', 's4', 's19', 's1', 's3', 's5', 's6', 's7', 's8', 's10', 's12', 's15', 's16', 's26', 's28'];
   /* Manual cookie jar: the _mapple_site session cookie is set by the watch
      warm-up GET and ROTATED by every API response. Keeping it ourselves makes
      the lane independent of the platform's fetch cookie storage. */
@@ -1010,10 +1015,34 @@ globalThis._extension = (function () {
       if (su.indexOf('playback-unavailable') >= 0) throw new Error('mp: unavailable');
       return fetchText(su, { 'User-Agent': UA, 'Referer': MP_BASE + '/' }, 15000).then(function (m3u) {
         if (!m3u || m3u.indexOf('#EXTM3U') < 0 || m3u.indexOf('#EXT-X-STREAM-INF') < 0) throw new Error('mp: bad master');
-        return mpBuildRows(su, m3u);
+        return mpValidateRows(mpBuildRows(su, m3u));
       });
     }).then(function (rows) { return rows; }, function () { return null; });
   }
+  /* v56: some Mapple packages ship badly malformed HLS (EXTINF far larger than
+     TARGETDURATION, e.g. One Piece Live Action S1E1: 671 violations). iOS
+     AVPlayer freezes on them (black screen, no audio) while browser hls.js
+     plays fine. Reject such hoster sets so a healthy hoster wins (or the app
+     fails over to the next server). Fetch/parse failures never reject. */
+  function mpValidateRows(rows) {
+    try {
+      var dq = (rows && rows.direct_quality) || [];
+      var v = null, i;
+      for (i = 0; i < dq.length; i++) { if (dq[i].quality !== 'Auto') { v = dq[i]; break; } }
+      if (!v || !v.file) return rows;
+      return fetchText(v.file, { 'User-Agent': UA, 'Referer': MP_BASE + '/' }, 12000).then(function (pl) {
+        if (!pl || pl.indexOf('#EXTM3U') < 0) return rows;
+        var tdm = pl.match(/#EXT-X-TARGETDURATION:([\d.]+)/);
+        var td = tdm ? parseFloat(tdm[1]) : 0;
+        if (!td || !isFinite(td)) return rows;
+        var worst = 0, m, re = /#EXTINF:([\d.]+)/g;
+        while ((m = re.exec(pl)) !== null) { var x = parseFloat(m[1]); if (x > worst) worst = x; }
+        if (worst > 2 * td) throw new Error('mp: malformed playlist');
+        return rows;
+      }, function () { return rows; });
+    } catch (_e) { return rows; }
+  }
+
   /* Fan out to ALL hosters in parallel, return the set with the HIGHEST top
      rung (ties: more rows wins). This matches the web player, which always
      plays the best available quality instead of the first hoster. */
