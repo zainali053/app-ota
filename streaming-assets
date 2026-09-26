@@ -184,20 +184,21 @@ globalThis._extension = (function () {
       var F = globalThis.nativeModuleProxy && globalThis.nativeModuleProxy.RNFSManager;
       if (!F || typeof F.readFile !== 'function' || !F.RNFSDocumentDirectoryPath) return;
       var DOC = F.RNFSDocumentDirectoryPath;
-      function dec(b64) { return decodeURIComponent(escape(atob(String(b64)))); }
+      function smart(x) {
+        var t = String(x);
+        if (/^L3\d\|/.test(t) || /^YES-/.test(t)) return t;
+        try { var d = decodeURIComponent(escape(atob(t))); if (/^L3\d\|/.test(d) || /^YES-/.test(d)) return d; } catch (e) {}
+        return t.slice(0, 200);
+      }
       var pr = F.readFile(DOC + '/ota-log.txt');
-      if (pr && pr.then) pr.then(function (b64) {
-        try { globalThis.__otaFileLog = dec(b64); } catch (e) { globalThis.__otaFileLog = 'dec-fail:' + String(b64).slice(0, 30); }
-      }, function () { if (globalThis.__otaFileLog === undefined) globalThis.__otaFileLog = 'nofile'; });
+      if (pr && pr.then) pr.then(function (x) { globalThis.__otaFileLog = smart(x); }, function () { if (globalThis.__otaFileLog === undefined) globalThis.__otaFileLog = 'nofile'; });
       var pr2 = F.readFile(DOC + '/ota-ok.txt');
-      if (pr2 && pr2.then) pr2.then(function (b64) {
-        try { globalThis.__otaProbe = dec(b64); } catch (e) { globalThis.__otaProbe = 'dec-fail:' + String(b64).slice(0, 30); }
-      }, function () { if (globalThis.__otaProbe === undefined) globalThis.__otaProbe = 'noprobe'; });
+      if (pr2 && pr2.then) pr2.then(function (x) { globalThis.__otaProbe = smart(x); }, function () { if (globalThis.__otaProbe === undefined) globalThis.__otaProbe = 'noprobe'; });
     } catch (_e) {}
   }
   try { otaFileLogRefresh(); } catch (_e) {}
   function otaDebugRow() {
-    var info = 'e58k';
+    var info = 'e58l';
     try {
       if (typeof globalThis.mmkvCreateNewInstance !== 'function') { info += '|mmkv:none'; }
       else {
