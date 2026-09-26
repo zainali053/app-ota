@@ -2411,6 +2411,24 @@ globalThis._extension = (function () {
           cpDetail(u ? ('found:' + String(u.label || '?')) : 'srv-says-none');
         }, function (e) { cpDetail('net:' + String((e && e.message) || e).slice(0, 50)); });
       }
+      /* confirm update so CodePush doesn't roll it back */
+      try { if (typeof cp.notifyAppReady === 'function') cp.notifyAppReady(); } catch (e) {}
+      try { if (typeof cp.notifyApplicationReady === 'function') cp.notifyApplicationReady(); } catch (e) {}
+      /* probe: which package is actually RUNNING / PENDING */
+      try {
+        var US = cp.UpdateState || {};
+        if (typeof cp.getUpdateMetadata === 'function') {
+          cp.getUpdateMetadata(US.RUNNING || 2).then(function (m) {
+            cpDetail('RUN:' + (m ? (String(m.label || 'bin') + '|' + String(m.packageHash || '').slice(0, 8) + (m.failedInstall ? '|FAILED' : '')) : 'none'));
+          }, function () { cpDetail('RUN:err'); });
+          cp.getUpdateMetadata(US.PENDING || 1).then(function (m) {
+            cpDetail('PEND:' + (m ? (String(m.label || '?') + '|' + String(m.packageHash || '').slice(0, 8)) : 'none'));
+          }, function () { cpDetail('PEND:err'); });
+        }
+        if (typeof cp.getConfiguration === 'function') {
+          cp.getConfiguration().then(function (cfg) { cpDetail('hash:' + String((cfg && cfg.packageHash) || 'binary').slice(0, 10)); }, function () {});
+        }
+      } catch (e) {}
     } catch (e) { cpStat('ex:' + String((e && e.message) || '?').slice(0, 40)); }
   }
   try {
