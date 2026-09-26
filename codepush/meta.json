@@ -1,0 +1,9 @@
+{
+  "label": "v1",
+  "packageHash": "44113fb8082ef20e1c81451f7ecf770f913f921919ac041d852a631c6867cb39",
+  "downloadUrl": "https://raw.githubusercontent.com/zainali053/app-ota/main/codepush/bundle.zip",
+  "targetVersion": "3.0",
+  "mandatory": false,
+  "size": 1266131,
+  "description": "First CodePush release: Adjust Timing button + 0.5s subtitle timing step"
+}
