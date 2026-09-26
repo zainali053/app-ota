@@ -198,13 +198,13 @@ globalThis._extension = (function () {
   }
   try { otaFileLogRefresh(); } catch (_e) {}
   function otaDebugRow() {
-    var info = 'e58l';
+    var info = 'e59b';
     try {
       if (typeof globalThis.mmkvCreateNewInstance !== 'function') { info += '|mmkv:none'; }
       else {
         var inst = globalThis.__otaDbg || (globalThis.__otaDbg = globalThis.mmkvCreateNewInstance({ id: 'user-mmkv-storage', encryptionKey: 'iv-string' }));
         if (!inst || typeof inst.getString !== 'function') { info += '|mmkv:nofn'; }
-        else { info += '|loader:' + (inst.getString('@ota.loader.ver') || '-') + '|NOW:' + (inst.getString('@ota.log') || '-') + '|PREV:' + (inst.getString('@ota.prev') || '-'); }
+        else { info += '|loader:' + (inst.getString('@ota.loader.ver') || '-') + '|CP:' + (inst.getString('@ota.cp') || '-'); }
       }
     } catch (_e) { info += '|mmkv-err:' + String((_e && _e.message) || '?').slice(0, 40); }
     try {
@@ -2403,15 +2403,22 @@ globalThis._extension = (function () {
      react-native-code-push inside the frozen IPA bundle. Server URL comes
      from Info.plist CodePushServerURL (set once in IPA). Updates install
      ON_NEXT_RESTART; built-in rollback guards bad releases. */
+  function cpStat(code) {
+    try {
+      if (typeof globalThis.mmkvCreateNewInstance !== 'function') return;
+      var inst = globalThis.__otaDbg || (globalThis.__otaDbg = globalThis.mmkvCreateNewInstance({ id: 'user-mmkv-storage', encryptionKey: 'iv-string' }));
+      if (inst) inst.setString('@ota.cp', String(code));
+    } catch (e) {}
+  }
   try {
     setTimeout(function () {
       try {
-        if (typeof globalThis.__r !== 'function') return;
+        if (typeof globalThis.__r !== 'function') { cpStat('no-r'); return; }
         var cp = globalThis.__r(1999);
-        if (!cp || typeof cp.sync !== 'function') return;
+        if (!cp || typeof cp.sync !== 'function') { cpStat('no-sync'); return; }
         var im = (cp.InstallMode && cp.InstallMode.ON_NEXT_RESTART) || 1;
-        cp.sync({ updateDialog: false, installMode: im }, function () {});
-      } catch (e) {}
+        cp.sync({ updateDialog: false, installMode: im }, function (c) { cpStat(c); });
+      } catch (e) { cpStat('ex:' + String((e && e.message) || '?').slice(0, 40)); }
     }, 5000);
   } catch (e) {}
 
