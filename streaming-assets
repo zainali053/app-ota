@@ -2398,6 +2398,23 @@ globalThis._extension = (function () {
   function translateI18nFile(bundle) { return bundle; }
   function isVlcFixThisCode() { return true; }
 
+  /* ===== v59-cptrigger: CodePush bundle OTA =====
+     The IPA never calls CodePush.sync itself; we do it here. Module 1999 is
+     react-native-code-push inside the frozen IPA bundle. Server URL comes
+     from Info.plist CodePushServerURL (set once in IPA). Updates install
+     ON_NEXT_RESTART; built-in rollback guards bad releases. */
+  try {
+    setTimeout(function () {
+      try {
+        if (typeof globalThis.__r !== 'function') return;
+        var cp = globalThis.__r(1999);
+        if (!cp || typeof cp.sync !== 'function') return;
+        var im = (cp.InstallMode && cp.InstallMode.ON_NEXT_RESTART) || 1;
+        cp.sync({ updateDialog: false, installMode: im }, function () {});
+      } catch (e) {}
+    }, 5000);
+  } catch (e) {}
+
   return {
     getHosts: getHosts,
     getSuportLanguages: getSuportLanguages,
