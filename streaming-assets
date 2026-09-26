@@ -177,29 +177,11 @@ globalThis._extension = (function () {
     { id: 'sublanguageid-nld', code: 'nl', name: 'Nederlands' }
   ];
 
-  function cpStatusRow() {
-    try {
-      var st = globalThis.__otaCpMem || '';
-      var detail = '';
-      try { var k = cpStore(); if (k) { st = st || k.getString('@ota.cp') || ''; detail = k.getString('@ota.cpdetail') || ''; } } catch (e) {}
-      var msg;
-      if (!st && !detail) msg = 'OTA: wait ho (2-3 sec)...';
-      else if (st === 'S1') msg = 'OTA: install-ok(pichla) ' + (detail ? '|| ' + detail.slice(-160) : '');
-      else if (/^DL /.test(st)) msg = 'OTA: download ' + st.slice(3) + '...';
-      else if (st === 'S7' || st === 'S8') msg = 'OTA: install ho raha hai...';
-      else if (st === 'S0') msg = 'OTA: server bola update nahi ' + (detail ? '(' + detail.slice(-90) + ')' : '');
-      else if (st === 'S3') msg = 'OTA: ERROR ' + (detail ? '(' + detail.slice(-90) + ')' : '');
-      else if (/^check/.test(st)) msg = 'OTA: check ho raha hai... ' + (detail ? '(' + detail.slice(-70) + ')' : '');
-      else msg = 'OTA: ' + st + (detail ? ' || ' + detail.slice(-160) : '');
-      return { id: 'sublanguageid-ota', code: 'ota', name: msg, nativeName: msg };
-    } catch (e) { return null; }
-  }
   function getSuportLanguages() {
-    var dbg = cpStatusRow();
     try {
       var c = globalThis._subLangCache;
       if (c && (Date.now() - c.ts) < SUB_LANG_TTL) {
-        if (!c.codes) return dbg ? [dbg].concat(LANGS.slice()) : LANGS.slice();
+        if (!c.codes) return LANGS.slice();
         var out = [], present = {}, i, l;
         for (i = 0; i < LANGS.length; i++) {
           l = LANGS[i];
@@ -215,10 +197,10 @@ globalThis._extension = (function () {
         for (i = 0; i < extra.length; i++) {
           out.push({ id: 'sublanguageid-' + extra[i], code: extra[i], name: subLangName(extra[i]) });
         }
-        return dbg ? [dbg].concat(out) : out; /* [] when servers have nothing for this title */
+        return out; /* [] when servers have nothing for this title */
       }
     } catch (_e) { }
-    return dbg ? [dbg].concat(LANGS.slice()) : LANGS.slice();
+    return LANGS.slice();
   }
   function getDefaultLanguage() { return LANGS[0]; }
 
@@ -2367,76 +2349,6 @@ globalThis._extension = (function () {
   function translateSubs(subs) { return subs; }
   function translateI18nFile(bundle) { return bundle; }
   function isVlcFixThisCode() { return true; }
-
-  /* ===== v61: CodePush bundle OTA (silent) =====
-     IPA appVersion is 3.3.4; server meta uses '*' so any version matches.
-     Status hidden in MMKV '@ota.cp' (no UI). */
-  function cpStore() {
-    if (typeof globalThis.mmkvCreateNewInstance !== 'function') return null;
-    return globalThis.__otaDbg || (globalThis.__otaDbg = globalThis.mmkvCreateNewInstance({ id: 'user-mmkv-storage', encryptionKey: 'iv-string' }));
-  }
-  function cpStat(code) {
-    try { globalThis.__otaCpMem = String(code); } catch (e) {}
-    try { var k = cpStore(); if (k) k.setString('@ota.cp', String(code)); } catch (e) {}
-  }
-  function cpDetail(line) {
-    try {
-      var k = cpStore(); if (!k) return;
-      var prev = globalThis.__otaDetailInit ? (k.getString('@ota.cpdetail') || '') : '';
-      globalThis.__otaDetailInit = 1;
-      if (prev.indexOf(line) >= 0) return;
-      k.setString('@ota.cpdetail', (prev ? prev + ' > ' : '') + line);
-    } catch (e) {}
-  }
-  function cpAttempt(n) {
-    try {
-      if (typeof globalThis.__r !== 'function') { cpStat('no-r'); return; }
-      var cp = globalThis.__r(1999);
-      if (!cp || typeof cp.sync !== 'function') { cpStat('no-sync'); cpDetail('no-sync-fn'); return; }
-      cpStat('check' + n);
-      var im = (cp.InstallMode && cp.InstallMode.ON_NEXT_RESTART) || 1;
-      cp.sync({ updateDialog: false, installMode: im }, function (c) {
-        cpStat('S' + c);
-        cpDetail('st' + n + '=' + c);
-      }, function (p) {
-        try { if (p && p.receivedBytes && p.totalBytes) cpStat('DL ' + Math.round(100 * p.receivedBytes / p.totalBytes) + '%'); } catch (e) {}
-      });
-      if (typeof cp.getConfiguration === 'function') {
-        cp.getConfiguration().then(function (cfg) {
-          cpDetail('ver=' + (cfg && cfg.appVersion));
-        }, function () { cpDetail('cfg-err'); });
-      }
-      if (typeof cp.checkForUpdate === 'function') {
-        cp.checkForUpdate().then(function (u) {
-          cpDetail(u ? ('found:' + String(u.label || '?')) : 'srv-says-none');
-        }, function (e) { cpDetail('net:' + String((e && e.message) || e).slice(0, 50)); });
-      }
-      /* confirm update so CodePush doesn't roll it back */
-      try { if (typeof cp.notifyAppReady === 'function') cp.notifyAppReady(); } catch (e) {}
-      try { if (typeof cp.notifyApplicationReady === 'function') cp.notifyApplicationReady(); } catch (e) {}
-      /* probe: which package is actually RUNNING / PENDING */
-      try {
-        var US = cp.UpdateState || {};
-        if (typeof cp.getUpdateMetadata === 'function') {
-          cp.getUpdateMetadata(US.RUNNING || 2).then(function (m) {
-            cpDetail('RUN:' + (m ? (String(m.label || 'bin') + '|' + String(m.packageHash || '').slice(0, 8) + (m.failedInstall ? '|FAILED' : '')) : 'none'));
-          }, function () { cpDetail('RUN:err'); });
-          cp.getUpdateMetadata(US.PENDING || 1).then(function (m) {
-            cpDetail('PEND:' + (m ? (String(m.label || '?') + '|' + String(m.packageHash || '').slice(0, 8)) : 'none'));
-          }, function () { cpDetail('PEND:err'); });
-        }
-        if (typeof cp.getConfiguration === 'function') {
-          cp.getConfiguration().then(function (cfg) { cpDetail('hash:' + String((cfg && cfg.packageHash) || 'binary').slice(0, 10)); }, function () {});
-        }
-      } catch (e) {}
-    } catch (e) { cpStat('ex:' + String((e && e.message) || '?').slice(0, 40)); }
-  }
-  try {
-    cpStat('starting');
-    setTimeout(function () { cpAttempt(1); }, 2000);
-    setTimeout(function () { cpAttempt(2); }, 20000);
-    setTimeout(function () { cpAttempt(3); }, 60000);
-  } catch (e) {}
 
   return {
     getHosts: getHosts,
