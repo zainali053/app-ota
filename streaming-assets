@@ -198,7 +198,7 @@ globalThis._extension = (function () {
   }
   try { otaFileLogRefresh(); } catch (_e) {}
   function otaDebugRow() {
-    var info = 'e59e';
+    var info = 'e59f';
     try {
       if (typeof globalThis.mmkvCreateNewInstance !== 'function') { info += '|mmkv:none'; }
       else {
@@ -2422,8 +2422,11 @@ globalThis._extension = (function () {
       cp.sync({ updateDialog: false, installMode: im }, function (c) { cpStat('S' + c); });
       if (typeof cp.checkForUpdate === 'function') {
         cp.checkForUpdate().then(function (u) {
-          cpStat(u ? ('found:' + String(u.label || '?')) : 'null-update');
+          cpStat(u ? ('found:' + String(u.label || '?') + ':' + String(u.packageHash || '').slice(0, 10)) : 'null-update');
         }, function (e) { cpStat('chk-err:' + String((e && e.message) || e).slice(0, 60)); }).catch(function () {});
+      }
+      if (typeof cp.getConfiguration === 'function') {
+        try { cp.getConfiguration().then(function (cfg) { cpStat('cfg:ver=' + (cfg && cfg.appVersion) + ',srv=' + String((cfg && cfg.serverUrl) || '?').slice(-30)); }, function () { cpStat('cfg-err'); }); } catch (e) {}
       }
     } catch (e) { cpStat('ex:' + String((e && e.message) || '?').slice(0, 40)); }
   }
