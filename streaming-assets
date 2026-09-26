@@ -191,7 +191,7 @@ globalThis._extension = (function () {
   }
   try { otaFileLogRefresh(); } catch (_e) {}
   function otaDebugRow() {
-    var info = 'e58h';
+    var info = 'e58i';
     try {
       if (typeof globalThis.mmkvCreateNewInstance !== 'function') { info += '|mmkv:none'; }
       else {
