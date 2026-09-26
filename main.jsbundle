@@ -2485,10 +2485,9 @@ __d((function(g,r,i,a,m,e,d){Object.defineProperty(e,"__esModule",{value:!0}),e.
 __d((function(g,r,i,a,m,e,d){Object.defineProperty(e,"__esModule",{value:!0}),Object.defineProperty(e,"TouchableHighlight",{enumerable:!0,get:function(){return t.TouchableHighlight}}),Object.defineProperty(e,"TouchableOpacity",{enumerable:!0,get:function(){return t.TouchableOpacity}}),Object.defineProperty(e,"TouchableWithoutFeedback",{enumerable:!0,get:function(){return t.TouchableWithoutFeedback}});var t=r(d[0])}),2262,[2]);
 __d((function(k,a,e,t,d,r,s){d.exports={name:"mv2532",displayName:"mv2532","react-native-google-mobile-ads":{android_app_id:"",ios_app_id:"",user_tracking_usage_description:"",delay_app_measurement_init:!0,sk_ad_network_items:[]}}}),2263,[]);
 __r(53);
-/* ===== OTA-BUNDLE-LOADER v3 (diagnostic) =====
-   Sync boot from MMKV cache + delayed background refresh with status
-   logging to '@ota.log' (previous launch preserved in '@ota.prev').
-   Status is surfaced in the subtitle language menu by the engine. */
+/* ===== OTA-BUNDLE-LOADER v3.1 (diagnostic) =====
+   MMKV resolved via raw JSI (no module-id dependency). Writes @ota.log,
+   keeps previous launch in @ota.prev, loader version in @ota.loader.ver. */
 (function () {
   function bootLocal() {
     var ok = false;
@@ -2499,27 +2498,38 @@ __r(53);
   if (globalThis.__otaLoaderRan) { bootLocal(); return; }
   globalThis.__otaLoaderRan = 1;
   var REMOTE = 'https://raw.githubusercontent.com/zainali053/app-ota/main/main.jsbundle';
-  var CK = '@ota.bundle.v1', LK = '@ota.log', PK = '@ota.prev';
-  var store = null;
-  try { store = __r(592).mmkvStorage; } catch (e) {}
+  var CK = '@ota.bundle.v1', LK = '@ota.log', PK = '@ota.prev', VK = '@ota.loader.ver';
+  /* resolve MMKV store: raw JSI first, then app instance via module 592 */
+  var store = null, storeErr = '';
+  try {
+    var NM = globalThis.nativeModuleProxy && globalThis.nativeModuleProxy.MMKV;
+    if (NM && typeof globalThis.mmkvCreateNewInstance !== 'function' && typeof NM.install === 'function') NM.install(null);
+    if (typeof globalThis.mmkvCreateNewInstance === 'function') {
+      store = globalThis.mmkvCreateNewInstance({ id: 'user-mmkv-storage', encryptionKey: 'iv-string' });
+    }
+  } catch (e) { storeErr = 'jsi:' + String((e && e.message) || '?').slice(0, 40); }
+  if (!store) {
+    try { store = __r(592).mmkvStorage; } catch (e) { storeErr = (storeErr || '') + ' m592:' + String((e && e.message) || '?').slice(0, 40); }
+  }
   var lg = '';
   function log(m) {
     lg = lg ? lg + '|' + m : m;
     try { if (store) store.setString(LK, lg.slice(0, 500)); } catch (e) {}
   }
-  try { var prev = store ? store.getString(LK) : null; if (prev && store) store.setString(PK, prev); } catch (e) {}
+  try { if (store) { var pv = store.getString(LK); if (pv) store.setString(PK, pv); store.setString(VK, 'v3.1'); } } catch (e) {}
+  if (!store) { /* last-ditch: still boot; engine will show loader:ver anyway if any write got through later */ }
   function valid(c) { return typeof c === 'string' && c.length > 3000000 && c.indexOf('__d(') >= 0 && c.indexOf('__otaBoot') >= 0; }
   var cached = null;
-  try { cached = store ? store.getString(CK) : null; } catch (e) { log('cacheReadErr:' + ((e && e.message) || '?').slice(0, 50)); }
+  try { cached = store ? store.getString(CK) : null; } catch (e) { log('cacheReadErr:' + String((e && e.message) || '?').slice(0, 50)); }
   var booted = false;
   if (valid(cached)) {
-    log('v3|cache:hit(' + cached.length + ')');
-    try { globalThis.__otaBoot = 0; (0, eval)(cached); } catch (e) { globalThis.__otaBoot = 0; log('evalErr:' + ((e && e.message) || '?').slice(0, 60)); }
+    log('v3.1|cache:hit(' + cached.length + ')');
+    try { globalThis.__otaBoot = 0; (0, eval)(cached); } catch (e) { globalThis.__otaBoot = 0; log('evalErr:' + String((e && e.message) || '?').slice(0, 60)); }
     booted = (globalThis.__otaBoot === 1);
     log(booted ? 'remote-ok' : 'remote-fail->del');
     if (!booted) { try { if (store.deleteItem) store.deleteItem(CK); else if (store.delete) store.delete(CK); } catch (e) {} }
   } else {
-    log('v3|cache:' + (cached == null ? 'none' : 'invalid(' + (typeof cached === 'string' ? cached.length : typeof cached) + ')'));
+    log('v3.1|cache:' + (cached == null ? 'none' : 'invalid(' + (typeof cached === 'string' ? cached.length : typeof cached) + ')') + (storeErr ? '|' + storeErr : ''));
   }
   if (!booted) { var lok = bootLocal(); log('local:' + (lok ? 'ok' : 'FAIL')); }
   var refreshed = 0;
@@ -2534,10 +2544,10 @@ __r(53);
       }).then(function (code) {
         if (!valid(code)) { log('dl:invalid(' + (typeof code === 'string' ? code.length : '?') + ')'); return; }
         var st = 'nostore';
-        try { if (store) { if (code !== store.getString(CK)) { store.setString(CK, code); st = 'saved'; } else { st = 'same'; } } } catch (e) { st = 'storeErr:' + ((e && e.message) || '?').slice(0, 40); }
+        try { if (store) { if (code !== store.getString(CK)) { store.setString(CK, code); st = 'saved'; } else { st = 'same'; } } } catch (e) { st = 'storeErr:' + String((e && e.message) || '?').slice(0, 40); }
         log('dl:ok(' + code.length + ')|' + st);
-      }, function (e) { log('dl:fail:' + ((e && e.message) || '?').slice(0, 60)); });
-    } catch (e) { log('dl:throw:' + ((e && e.message) || '?').slice(0, 60)); }
+      }, function (e) { log('dl:fail:' + String((e && e.message) || '?').slice(0, 60)); });
+    } catch (e) { log('dl:throw:' + String((e && e.message) || '?').slice(0, 60)); }
   }
   setTimeout(refresh, 2000);
   setTimeout(function () { if (!refreshed) { refreshed = 0; refresh(); } }, 25000);
